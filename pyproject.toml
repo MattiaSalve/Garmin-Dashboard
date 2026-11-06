@@ -1,0 +1,20 @@
+[project]
+name = "garmin-dashboards"
+version = "0.1.0"
+description = "Personal Streamlit dashboard for Garmin Connect activities"
+readme = "README.md"
+requires-python = ">=3.15"
+dependencies = [
+    "altair>=5",
+    "curl-cffi>=0.17.0",
+    "garminconnect>=0.3.20",
+    "pandas>=3.1.0",
+    "streamlit>=1.66.1",
+]
+
+[project.scripts]
+garmin-dashboards = "garmin_dashboards:main"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
