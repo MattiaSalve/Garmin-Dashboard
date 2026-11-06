@@ -208,3 +208,110 @@ def daily_totals(start: date, end: date, sport: str | None = None, db_path: str 
         }
         for r in rows
     ]
+
+
+# Garmin sport keys grouped for "km cycled / km run" style totals.
+SPORT_GROUPS = {
+    "Cycling": ("road_biking", "indoor_cycling", "cycling", "virtual_ride", "mountain_biking", "gravel_cycling"),
+    "Running": ("running", "trail_running", "treadmill_running", "track_running"),
+}
+
+# Whitelisted sort orders for search_activities (never interpolate user input).
+SEARCH_ORDERS = {
+    "Newest first": "start_time_local DESC",
+    "Oldest first": "start_time_local ASC",
+    "Longest distance": "distance_m DESC",
+    "Most elevation": "elevation_gain_m DESC",
+    "Longest time": "moving_duration_s DESC",
+}
+
+
+def search_activities(
+    start: date | None = None,
+    end: date | None = None,
+    sports: list[str] | None = None,
+    min_km: float | None = None,
+    max_km: float | None = None,
+    min_elevation_m: float | None = None,
+    max_elevation_m: float | None = None,
+    min_hours: float | None = None,
+    max_hours: float | None = None,
+    text: str | None = None,
+    order: str = "Newest first",
+    db_path: str = DB_NAME,
+) -> list[dict]:
+    """Activities matching every given filter (None = no limit)."""
+    clauses, params = [], {}
+
+    def add(clause: str, name: str, value) -> None:
+        if value is not None:
+            clauses.append(clause)
+            params[name] = value
+
+    add("date(start_time_local) >= :start", "start", start and start.isoformat())
+    add("date(start_time_local) <= :end", "end", end and end.isoformat())
+    add("distance_m >= :min_m", "min_m", None if min_km is None else min_km * 1000)
+    add("distance_m <= :max_m", "max_m", None if max_km is None else max_km * 1000)
+    add("elevation_gain_m >= :min_e", "min_e", min_elevation_m)
+    add("elevation_gain_m <= :max_e", "max_e", max_elevation_m)
+    add("moving_duration_s >= :min_s", "min_s", None if min_hours is None else min_hours * 3600)
+    add("moving_duration_s <= :max_s", "max_s", None if max_hours is None else max_hours * 3600)
+    if text:
+        add("(activity_name LIKE :text OR location_name LIKE :text)", "text", f"%{text}%")
+    if sports:
+        names = {f"sport{i}": s for i, s in enumerate(sports)}
+        clauses.append(f"sport_type IN ({', '.join(':' + n for n in names)})")
+        params.update(names)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT activity_id, start_time_local, activity_name, sport_type, distance_m,
+                   moving_duration_s, elevation_gain_m, avg_hr, max_hr, avg_power_w,
+                   calories, training_stress_score
+            FROM activities {where}
+            ORDER BY {SEARCH_ORDERS[order]}
+            """,
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def distance_by_group(start: date, end: date, db_path: str = DB_NAME) -> dict[str, float]:
+    """Kilometres per sport group (see SPORT_GROUPS) in the inclusive date range."""
+    params = {"start": start.isoformat(), "end": end.isoformat(), "sport": None}
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT sport_type, COALESCE(SUM(distance_m), 0) AS m FROM activities {_FILTER} GROUP BY sport_type",
+            params,
+        ).fetchall()
+    by_type = {r["sport_type"]: r["m"] for r in rows}
+    return {g: sum(by_type.get(s, 0) for s in sports) / 1000 for g, sports in SPORT_GROUPS.items()}
+
+
+def latest_vo2max(group: str, db_path: str = DB_NAME) -> dict | None:
+    """Most recent VO2max reading for a sport group, or None."""
+    sports = SPORT_GROUPS[group]
+    marks = ", ".join("?" * len(sports))
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT vo2max, date(start_time_local) AS day FROM activities "
+            f"WHERE vo2max IS NOT NULL AND sport_type IN ({marks}) "
+            f"ORDER BY start_time_local DESC LIMIT 1",
+            sports,
+        ).fetchone()
+    return {"value": row["vo2max"], "day": row["day"]} if row else None
+
+
+def filter_bounds(db_path: str = DB_NAME) -> dict:
+    """Largest distance (km), elevation gain (m) and moving time (h), for filter sliders."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT MAX(distance_m) AS d, MAX(elevation_gain_m) AS e, MAX(moving_duration_s) AS s FROM activities"
+        ).fetchone()
+    return {
+        "km": (row["d"] or 0) / 1000,
+        "elevation_m": row["e"] or 0,
+        "hours": (row["s"] or 0) / 3600,
+    }

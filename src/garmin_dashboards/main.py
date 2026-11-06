@@ -4,6 +4,7 @@ Run from the project root:
     .venv/bin/streamlit run src/garmin_dashboards/main.py
 """
 
+import math
 import sqlite3
 from datetime import date, timedelta
 
@@ -15,7 +16,21 @@ from garminconnect.activity_details import parse_activity_detail_metrics
 from garmin_dashboards import auth
 from garmin_dashboards.db import DB_NAME, init_db
 from garmin_dashboards.fitness import fitness_series
-from garmin_dashboards.metrics import by_sport, daily_totals, daily_training_load, power_curve, summary, weekly_hr_zones, weekly_totals
+from garmin_dashboards.metrics import (
+    SEARCH_ORDERS,
+    SPORT_GROUPS,
+    by_sport,
+    daily_totals,
+    daily_training_load,
+    distance_by_group,
+    filter_bounds,
+    latest_vo2max,
+    power_curve,
+    search_activities,
+    summary,
+    weekly_hr_zones,
+    weekly_totals,
+)
 from garmin_dashboards.sync import sync
 
 
@@ -104,42 +119,34 @@ def sport_options() -> list[str]:
     return [r[0] for r in rows]
 
 
-def activities_table(start: date, end: date, sport: str | None) -> pd.DataFrame:
-    with sqlite3.connect(DB_NAME) as conn:
-        df = pd.read_sql_query(
-            """
-            SELECT activity_id, start_time_local, activity_name, sport_type, distance_m,
-                   moving_duration_s, elevation_gain_m, avg_hr, max_hr, avg_power_w,
-                   calories, training_stress_score
-            FROM activities
-            WHERE date(start_time_local) BETWEEN ? AND ?
-              AND (? IS NULL OR sport_type = ?)
-            ORDER BY start_time_local DESC
-            """,
-            conn,
-            params=(start.isoformat(), end.isoformat(), sport, sport),
-        )
-    moving_h = df["moving_duration_s"] / 3600
-    df["sport_type"] = df["sport_type"].map(display_sport)
-    df["distance_km"] = (df["distance_m"] / 1000).round(2)
-    df["moving_time"] = df["moving_duration_s"].map(fmt_seconds_hm)
-    df["avg_speed_kmh"] = (df["distance_m"] / 1000 / moving_h).round(1)
-    df = df.drop(columns=["distance_m", "moving_duration_s"])
-    df = df.rename(columns={
-        "start_time_local": "Start",
-        "activity_name": "Name",
-        "sport_type": "Sport",
-        "distance_km": "Distance (km)",
-        "moving_time": "Moving time (h:mm)",
-        "avg_speed_kmh": "Avg speed (km/h)",
-        "elevation_gain_m": "Elevation gain (m)",
-        "avg_hr": "Avg HR (bpm)",
-        "max_hr": "Max HR (bpm)",
-        "avg_power_w": "Avg power (W)",
-        "calories": "Calories (kcal)",
-        "training_stress_score": "Training stress",
+COMPACT_COLUMNS = ["Date", "Name", "Sport", "Distance (km)", "Time (h:mm)", "Elevation (m)", "Avg HR"]
+
+
+def activities_table(rows: list[dict], compact: bool = True) -> pd.DataFrame:
+    """Activities as a display table indexed by activity_id."""
+    df = pd.DataFrame(rows, columns=[
+        "activity_id", "start_time_local", "activity_name", "sport_type", "distance_m",
+        "moving_duration_s", "elevation_gain_m", "avg_hr", "max_hr", "avg_power_w",
+        "calories", "training_stress_score",
+    ])
+    # A column that is entirely NULL arrives as object dtype and breaks round(); force numbers.
+    numeric = ["distance_m", "moving_duration_s", "elevation_gain_m", "avg_hr", "max_hr",
+               "avg_power_w", "calories", "training_stress_score"]
+    df[numeric] = df[numeric].apply(pd.to_numeric, errors="coerce")
+    out = pd.DataFrame({
+        "Date": df["start_time_local"].str[:10],
+        "Name": df["activity_name"],
+        "Sport": df["sport_type"].map(display_sport),
+        "Distance (km)": (df["distance_m"] / 1000).round(1),
+        "Time (h:mm)": df["moving_duration_s"].map(fmt_seconds_hm),
+        "Elevation (m)": df["elevation_gain_m"].round(0),
+        "Avg speed (km/h)": (df["distance_m"] / 1000 / (df["moving_duration_s"] / 3600)).round(1),
+        "Avg HR": df["avg_hr"].round(0),
+        "Avg power (W)": df["avg_power_w"].round(0),
+        "Calories": df["calories"].round(0),
     })
-    return df.set_index("activity_id")
+    out.index = df["activity_id"]
+    return out[COMPACT_COLUMNS] if compact else out
 
 
 def ride_details(activity_id: int) -> dict:
@@ -186,28 +193,26 @@ def show_ride_details(activity_id: int) -> None:
     st.caption(f"Started {r['start_time_local']}{place}")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Distance", _fmt(r["distance_m"] and r["distance_m"] / 1000, "{:,.2f} km"))
+    c1.metric("Distance", _fmt(r["distance_m"] and r["distance_m"] / 1000, "{:,.1f} km"))
     c2.metric("Moving time", fmt_seconds_hm(r["moving_duration_s"]) or "–")
     c3.metric("Avg speed", _fmt(speed, "{:,.1f} km/h"))
-    c4.metric("Max speed", _fmt(r["max_speed_mps"] and r["max_speed_mps"] * 3.6, "{:,.1f} km/h"))
+    c4.metric("Elevation gain", _fmt(r["elevation_gain_m"], "{:,.0f} m"))
 
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Elevation gain", _fmt(r["elevation_gain_m"], "{:,.0f} m"))
-    c6.metric("Elevation loss", _fmt(r["elevation_loss_m"], "{:,.0f} m"))
-    c7.metric("Avg heart rate", _fmt(r["avg_hr"], "{:,.0f} bpm"))
-    c8.metric("Max heart rate", _fmt(r["max_hr"], "{:,.0f} bpm"))
-
-    c9, c10, c11, c12 = st.columns(4)
-    c9.metric("Avg power", _fmt(r["avg_power_w"], "{:,.0f} W"))
-    c10.metric("Normalized power", _fmt(r["norm_power_w"], "{:,.0f} W"))
-    c11.metric("Max power", _fmt(r["max_power_w"], "{:,.0f} W"))
-    c12.metric("Calories", _fmt(r["calories"], "{:,.0f} kcal"))
-
-    c13, c14, c15, c16 = st.columns(4)
-    c13.metric("Training stress", _fmt(r["training_stress_score"], "{:,.0f}"))
-    c14.metric("Aerobic effect", _fmt(r["aerobic_te"], "{:,.1f}"))
-    c15.metric("Anaerobic effect", _fmt(r["anaerobic_te"], "{:,.1f}"))
-    c16.metric("VO2max", _fmt(r["vo2max"], "{:,.0f}"))
+    with st.expander("More stats"):
+        rows = [
+            ("Max speed", _fmt(r["max_speed_mps"] and r["max_speed_mps"] * 3.6, "{:,.1f} km/h")),
+            ("Elevation loss", _fmt(r["elevation_loss_m"], "{:,.0f} m")),
+            ("Avg / max heart rate", f"{_fmt(r['avg_hr'], '{:,.0f}')} / {_fmt(r['max_hr'], '{:,.0f}')} bpm"),
+            ("Avg / norm / max power",
+             f"{_fmt(r['avg_power_w'], '{:,.0f}')} / {_fmt(r['norm_power_w'], '{:,.0f}')} / "
+             f"{_fmt(r['max_power_w'], '{:,.0f}')} W"),
+            ("Calories", _fmt(r["calories"], "{:,.0f} kcal")),
+            ("Training load", _fmt(r["training_load"], "{:,.0f}")),
+            ("Training stress", _fmt(r["training_stress_score"], "{:,.0f}")),
+            ("Aerobic / anaerobic effect", f"{_fmt(r['aerobic_te'], '{:,.1f}')} / {_fmt(r['anaerobic_te'], '{:,.1f}')}"),
+            ("VO2max", _fmt(r["vo2max"], "{:,.0f}")),
+        ]
+        st.table(pd.DataFrame(rows, columns=["", ""]).set_index(""))
 
     show_ride_charts(activity_id)
 
@@ -219,28 +224,42 @@ def load_activity_samples(_api, activity_id: int) -> pd.DataFrame:
     return pd.DataFrame(parse_activity_detail_metrics(details))
 
 
-def _area(data: pd.DataFrame, color: str, y_title: str) -> alt.Chart:
+def _x_encoding(x_title: str, domain: tuple[float, float] | None) -> alt.X:
+    scale = alt.Scale(domain=list(domain), nice=False) if domain else alt.Scale(nice=False)
+    return alt.X("x:Q", title=x_title, scale=scale)
+
+
+def _area(data: pd.DataFrame, color: str, y_title: str, x_title: str, domain) -> alt.Chart:
     return (
         alt.Chart(data)
-        .mark_area(opacity=0.7, color=color)
-        .encode(
-            x=alt.X("minutes:Q", title="Moving time (min)"),
-            y=alt.Y("value:Q", title=y_title),
-        )
+        .mark_area(opacity=0.7, color=color, clip=True)
+        .encode(x=_x_encoding(x_title, domain), y=alt.Y("value:Q", title=y_title))
     )
 
 
 def trailing_average(data: pd.DataFrame, window: str | None) -> pd.DataFrame:
-    """Running mean of `value` from the start (window=None) or over a time window, keeping `minutes`."""
-    series = pd.Series(
-        data["value"].to_numpy(),
-        index=pd.to_timedelta(data["minutes"].to_numpy() * 60, unit="s"),
-    ).sort_index()
-    averaged = series.expanding().mean() if window is None else series.rolling(window).mean()
-    return pd.DataFrame({
-        "minutes": averaged.index.total_seconds() / 60,
-        "value": averaged.to_numpy(),
-    }).dropna()
+    """Running mean of `value` from the start (window=None) or over a time window.
+
+    `data` needs `minutes` and `value` columns; any other columns (e.g. `x`) are kept.
+    """
+    data = data.sort_values("minutes")
+    if window is None:
+        averaged = data["value"].expanding().mean()
+    else:
+        timed = pd.Series(
+            data["value"].to_numpy(), index=pd.to_timedelta(data["minutes"].to_numpy() * 60, unit="s")
+        )
+        averaged = pd.Series(timed.rolling(window).mean().to_numpy(), index=data.index)
+    return data.assign(value=averaged).dropna(subset=["value"])
+
+
+def zoom_from_event(event) -> tuple[float, float] | None:
+    """The x-range dragged on a chart (interval selection named 'zoom'), or None."""
+    sel = event.selection.get("zoom") if event is not None else None
+    values = sel.get("x") if isinstance(sel, dict) else None
+    if values and len(values) == 2 and values[0] != values[1]:
+        return (float(min(values)), float(max(values)))
+    return None
 
 
 def show_ride_charts(activity_id: int) -> None:
@@ -261,6 +280,25 @@ def show_ride_charts(activity_id: int) -> None:
         st.caption("This ride has no timing data to plot against.")
         return
     minutes = samples[time_col] / 60
+    has_distance = "sumDistance" in samples and samples["sumDistance"].notna().any()
+
+    st.subheader("Ride charts")
+    by_distance = has_distance and st.radio(
+        "X axis", ["Distance", "Time"], horizontal=True, key=f"xaxis_{activity_id}"
+    ) == "Distance"
+    if by_distance:
+        x_values, x_title = samples["sumDistance"] / 1000, "Distance (km)"
+    else:
+        x_values, x_title = minutes, "Moving time (min)"
+
+    # Dragging on any chart sets the zoom; it is kept per ride and axis, and cleared by the button.
+    zoom_key = f"zoom_{activity_id}_{'km' if by_distance else 'min'}"
+    zoom = st.session_state.get(zoom_key)
+    if zoom and st.button("Reset zoom", key=f"reset_{zoom_key}"):
+        st.session_state.pop(zoom_key)
+        st.rerun()
+    if not zoom:
+        st.caption("Drag across a chart to zoom in on that part of the ride.")
 
     # Collect each channel that has data, as (unit, values) keyed by its title.
     series = {}
@@ -272,26 +310,30 @@ def show_ride_charts(activity_id: int) -> None:
         st.caption("This ride has no heart rate, power, speed, elevation, or cadence data.")
         return
 
-    def frame(title: str) -> pd.DataFrame:
-        return pd.DataFrame({"minutes": minutes, "value": series[title][1]}).dropna()
+    def frame(title: str, zoomed: bool = True) -> pd.DataFrame:
+        df = pd.DataFrame({"x": x_values, "minutes": minutes, "value": series[title][1]}).dropna()
+        if zoomed and zoom:
+            df = df[df["x"].between(*zoom)]
+        return df
 
     elevation_frame = frame("Elevation") if "Elevation" in series else None
+    brush = alt.selection_interval(name="zoom", encodings=["x"])
 
     charts = []
     for title in CHART_ORDER:
         if title not in series:
             continue
         unit = series[title][0]
-        base = _area(frame(title), CHANNEL_COLORS[title], unit)
+        base = _area(frame(title), CHANNEL_COLORS[title], unit, x_title, zoom).add_params(brush)
         if title == "Speed":
-            trailing = trailing_average(frame(title), TRAILING_SPEED_WINDOW)
+            # Average from the start of the ride, then cut to the zoomed range.
+            trailing = trailing_average(frame(title, zoomed=False), TRAILING_SPEED_WINDOW)
+            if zoom:
+                trailing = trailing[trailing["x"].between(*zoom)]
             line = (
                 alt.Chart(trailing)
-                .mark_line(color=CHANNEL_COLORS[title], opacity=1)
-                .encode(
-                    x=alt.X("minutes:Q", title="Moving time (min)"),
-                    y=alt.Y("value:Q", title=unit),
-                )
+                .mark_line(color=CHANNEL_COLORS[title], opacity=1, clip=True)
+                .encode(x=_x_encoding(x_title, zoom), y=alt.Y("value:Q", title=unit))
             )
             base = alt.layer(base, line)
         if title == "Elevation":
@@ -300,20 +342,28 @@ def show_ride_charts(activity_id: int) -> None:
             # Strava-style: elevation as a grey filled background on its own (right) axis.
             background = (
                 alt.Chart(elevation_frame)
-                .mark_area(opacity=0.3, color=CHANNEL_COLORS["Elevation"])
+                .mark_area(opacity=0.3, color=CHANNEL_COLORS["Elevation"], clip=True)
                 .encode(
-                    x=alt.X("minutes:Q", title="Moving time (min)"),
+                    x=_x_encoding(x_title, zoom),
                     y=alt.Y("value:Q", title="Elevation (m)", axis=alt.Axis(orient="right")),
                 )
             )
             chart = alt.layer(background, base).resolve_scale(y="independent")
         else:
             chart = base
-        charts.append(chart.properties(title=f"{title} ({unit})", height=340))
+        charts.append((title, chart.properties(title=f"{title} ({unit})", height=340)))
 
-    st.subheader("Ride charts")
-    for chart in charts:
-        st.altair_chart(chart, width="stretch")
+    picked = None
+    for title, chart in charts:
+        # The zoom is part of the key so each zoom level starts with a fresh (empty) brush.
+        event = st.altair_chart(
+            chart, width="stretch", on_select="rerun", selection_mode="zoom",
+            key=f"ride_{activity_id}_{title}_{zoom}_{by_distance}",
+        )
+        picked = picked or zoom_from_event(event)
+    if picked:
+        st.session_state[zoom_key] = picked
+        st.rerun()
 
 
 def auto_sync(email: str) -> None:
@@ -333,7 +383,8 @@ def sidebar(email: str) -> None:
     with st.sidebar:
         st.write(f"Signed in as **{email}**")
 
-        full = st.checkbox("Full re-sync", help="Re-download the entire history.")
+        with st.expander("Sync options"):
+            full = st.checkbox("Full re-sync", help="Re-download the entire history.")
         if st.button("Sync from Garmin"):
             try:
                 with st.spinner("Downloading activities..."):
@@ -472,29 +523,117 @@ def show_calendar(start: date, end: date, sport: str | None) -> None:
     st.altair_chart(chart, width="stretch")
 
 
-def show_dashboard(start: date, end: date, sport: str | None) -> None:
-    s = summary(start, end, sport)
-    if s["activity_count"] == 0:
-        st.info("No activities in this range. Try another date range or sport, or sync from Garmin.")
+def pick_ride(rows: list[dict], key: str) -> None:
+    """Show a selectable activity table and the details of the selected one."""
+    if not rows:
+        st.info("No activities match.")
         return
+    table = activities_table(rows)
+    event = st.dataframe(
+        table, hide_index=True, on_select="rerun", selection_mode="single-row", key=key,
+        width="stretch",
+    )
+    if event.selection.rows:
+        show_ride_details(int(table.index[event.selection.rows[0]]))
+    else:
+        st.caption("Select an activity to see its details.")
 
+
+def _delta(now: float, before: float, unit: str, digits: int = 0) -> str | None:
+    diff = now - before
+    return f"{diff:+,.{digits}f} {unit}".strip() if before else None
+
+
+def show_overview() -> None:
+    today = date.today()
+    week = (today - timedelta(days=6), today)
+    prev = (today - timedelta(days=13), today - timedelta(days=7))
+    s, p = summary(*week), summary(*prev)
+
+    st.subheader("Last 7 days")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Activities", f"{s['activity_count']:,}")
-    c2.metric("Distance", f"{s['total_distance_km']:,.1f} km")
-    c3.metric("Moving time", fmt_seconds_hm(s["total_moving_duration_h"] * 3600) or "–")
-    c4.metric("Avg speed", f"{s['avg_speed_kmh']:,.1f} km/h" if s["avg_speed_kmh"] else "–")
+    c1.metric("Activities", f"{s['activity_count']}", _delta(s["activity_count"], p["activity_count"], ""))
+    c2.metric("Distance", f"{s['total_distance_km']:,.0f} km", _delta(s["total_distance_km"], p["total_distance_km"], "km"))
+    c3.metric("Time", fmt_seconds_hm(s["total_moving_duration_h"] * 3600) or "0:00",
+              _delta(s["total_moving_duration_h"], p["total_moving_duration_h"], "h", 1))
+    c4.metric("Elevation", f"{s['total_elevation_gain_m']:,.0f} m",
+              _delta(s["total_elevation_gain_m"], p["total_elevation_gain_m"], "m"))
+    st.caption("Changes compare with the 7 days before.")
+    pick_ride(search_activities(start=week[0], end=week[1]), key="overview_rides")
 
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Elevation gain", f"{s['total_elevation_gain_m']:,.0f} m")
-    c6.metric("Avg distance", f"{s['avg_distance_km']:,.1f} km")
-    c7.metric("Avg heart rate", f"{s['avg_hr']:,.0f} bpm" if s["avg_hr"] else "–")
-    c8.metric("Training load", f"{s['total_training_load']:,.0f}")
+    st.subheader("Health")
+    daily = {date.fromisoformat(r["day"]): r["load"] for r in daily_training_load()}
+    now = fitness_series(daily, end=today)[-1] if daily else None
+    h1, h2, h3, h4 = st.columns(4)
+    for col, group in zip((h1, h2), SPORT_GROUPS):
+        v = latest_vo2max(group)
+        col.metric(f"VO₂max · {group.lower()}", f"{v['value']:.0f}" if v else "–")
+    h3.metric("Fitness", f"{now['fitness']:.0f}" if now else "–")
+    h4.metric("Form", f"{now['form']:+.0f}" if now else "–", help="Fitness minus fatigue. Negative means tired.")
 
+    periods = {
+        "7 days": week,
+        "30 days": (today - timedelta(days=29), today),
+        "This year": (date(today.year, 1, 1), today),
+        "All time": (date(1970, 1, 1), today),
+    }
+    totals = {name: distance_by_group(*rng) for name, rng in periods.items()}
+    km = pd.DataFrame(totals).round(0).astype(int)
+    km.index = [f"{g} (km)" for g in km.index]
+    st.table(km)
+
+
+def show_find() -> None:
+    bounds = filter_bounds()
+    if not bounds["km"]:
+        st.info("No activities yet. Sync from Garmin first.")
+        return
+    max_km, max_elev, max_h = math.ceil(bounds["km"]), math.ceil(bounds["elevation_m"]), math.ceil(bounds["hours"])
+
+    f1, f2, f3 = st.columns([2, 2, 1])
+    text = f1.text_input("Search", placeholder="Name or place")
+    sports = f2.multiselect("Sport", sport_options(), format_func=display_sport, placeholder="All sports")
+    period = f3.selectbox("Period", ["All time", "Last 30 days", "Last 90 days", "This year", "Last year"])
+    s1, s2, s3 = st.columns(3)
+    km = s1.slider("Distance (km)", 0, max_km, (0, max_km))
+    elev = s2.slider("Elevation gain (m)", 0, max_elev, (0, max_elev), step=10)
+    hours = s3.slider("Moving time (h)", 0.0, float(max_h), (0.0, float(max_h)), step=0.25)
+
+    today = date.today()
+    start, end = {
+        "All time": (None, None),
+        "Last 30 days": (today - timedelta(days=29), None),
+        "Last 90 days": (today - timedelta(days=89), None),
+        "This year": (date(today.year, 1, 1), None),
+        "Last year": (date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)),
+    }[period]
+
+    def bound(value, lo, hi, is_min):
+        """A slider at its extreme means 'no limit', so rows missing that metric still match."""
+        return None if value == (lo if is_min else hi) else value
+
+    order = st.selectbox("Sort by", list(SEARCH_ORDERS), label_visibility="collapsed")
+    rows = search_activities(
+        start=start, end=end, sports=sports or None, text=text or None, order=order,
+        min_km=bound(km[0], 0, max_km, True), max_km=bound(km[1], 0, max_km, False),
+        min_elevation_m=bound(elev[0], 0, max_elev, True), max_elevation_m=bound(elev[1], 0, max_elev, False),
+        min_hours=bound(hours[0], 0.0, float(max_h), True), max_hours=bound(hours[1], 0.0, float(max_h), False),
+    )
+    st.caption(f"{len(rows)} activities")
+    pick_ride(rows, key="find_rides")
+
+
+CHARTS = [
+    "Weekly distance", "Fitness and form", "Heart-rate zones", "Power curve",
+    "Calendar", "Weekly training load", "Time by sport",
+]
+
+
+def show_weekly_distance(start: date, end: date, sport: str | None) -> None:
     weekly = pd.DataFrame(weekly_totals(start, end, sport))
-    st.subheader("Weekly distance (km)")
     st.caption("Click a week to see its rides.")
     week_pick = alt.selection_point(name="week", fields=["week_start"])
-    distance_chart = (
+    chart = (
         alt.Chart(weekly)
         .mark_bar()
         .encode(
@@ -510,61 +649,59 @@ def show_dashboard(start: date, end: date, sport: str | None) -> None:
         .add_params(week_pick)
         .properties(height=300)
     )
-    event = st.altair_chart(
-        distance_chart,
-        on_select="rerun",
-        selection_mode="week",
-        key="weekly_chart",
-        width="stretch",
-    )
+    event = st.altair_chart(chart, on_select="rerun", selection_mode="week", key="weekly_chart", width="stretch")
+    week_start = selected_week(event)
+    if week_start:
+        ws = date.fromisoformat(week_start)
+        rows = search_activities(start=ws, end=ws + timedelta(days=6), sports=[sport] if sport else None)
+        st.markdown(f"**Week of {ws:%d %b %Y}** · {len(rows)} activities")
+        pick_ride(rows, key="week_rides")
 
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Weekly training load")
+
+def show_trends() -> None:
+    today = date.today()
+    c1, c2, c3 = st.columns([2, 2, 1])
+    chart_name = c1.selectbox("Chart", CHARTS)
+    picked = c2.date_input("Date range", value=(today - timedelta(days=DEFAULT_RANGE_DAYS), today))
+    sport_choice = c3.selectbox(
+        "Sport", ["All"] + sport_options(), format_func=lambda x: "All" if x == "All" else display_sport(x)
+    )
+    if not isinstance(picked, tuple) or len(picked) != 2:
+        st.info("Select an end date.")
+        return
+    start, end = picked
+    sport = None if sport_choice == "All" else sport_choice
+    if summary(start, end, sport)["activity_count"] == 0:
+        st.info("No activities in this range. Try another date range or sport.")
+        return
+
+    if chart_name == "Weekly distance":
+        show_weekly_distance(start, end, sport)
+    elif chart_name == "Fitness and form":
+        show_fitness_chart(start, end)
+    elif chart_name == "Heart-rate zones":
+        show_hr_zones(start, end, sport)
+    elif chart_name == "Power curve":
+        show_power_curve(start, end, sport)
+    elif chart_name == "Calendar":
+        show_calendar(start, end, sport)
+    elif chart_name == "Weekly training load":
+        weekly = pd.DataFrame(weekly_totals(start, end, sport))
         st.bar_chart(weekly.set_index("week_start")[["total_training_load"]])
-    with right:
-        st.subheader("Time by sport (hours)")
+    else:
         sports = pd.DataFrame(by_sport(start, end))
         sports["sport_type"] = sports["sport_type"].map(display_sport)
         st.bar_chart(sports.set_index("sport_type")[["total_moving_duration_h"]])
 
-    show_fitness_chart(start, end)
-    show_hr_zones(start, end, sport)
-    show_power_curve(start, end, sport)
-    show_calendar(start, end, sport)
-
-    week_start = selected_week(event)
-    st.subheader("Rides")
-    if week_start is None:
-        st.info("Click a week in the chart above to list its rides.")
-    else:
-        ws = date.fromisoformat(week_start)
-        rides = activities_table(ws, ws + timedelta(days=6), sport)
-        st.markdown(f"**Week of {ws:%d %b %Y}** · {len(rides)} rides")
-        ride_event = st.dataframe(
-            rides,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            key="rides_table",
-        )
-        if ride_event.selection.rows:
-            show_ride_details(int(rides.index[ride_event.selection.rows[0]]))
-        else:
-            st.caption("Select a ride in the table to see its details.")
-
-    st.subheader("All activities in range")
-    st.dataframe(activities_table(start, end, sport), hide_index=True)
-
 
 def main() -> None:
-    st.set_page_config(page_title="Garmin dashboard", layout="wide")
-    st.title("Garmin dashboard")
+    st.set_page_config(page_title="Garmin dashboard", layout="centered")
     init_db()
 
     if "api" not in st.session_state:
         try_restore_session()
     if "api" not in st.session_state:
+        st.title("Garmin dashboard")
         sign_in_form()
         return
 
@@ -572,24 +709,10 @@ def main() -> None:
     auto_sync(email)
     sidebar(email)
 
-    today = date.today()
-    picked = st.date_input(
-        "Date range",
-        value=(today - timedelta(days=DEFAULT_RANGE_DAYS), today),
+    page = st.segmented_control(
+        "Page", ["Overview", "Find", "Trends"], default="Overview", label_visibility="collapsed"
     )
-    if not isinstance(picked, tuple) or len(picked) != 2:
-        st.info("Select an end date to show the dashboard.")
-        return
-    start, end = picked
-
-    sport_choice = st.selectbox(
-        "Sport",
-        ["All"] + sport_options(),
-        format_func=lambda s: "All" if s == "All" else display_sport(s),
-    )
-    sport = None if sport_choice == "All" else sport_choice
-
-    show_dashboard(start, end, sport)
+    {"Find": show_find, "Trends": show_trends}.get(page, show_overview)()
 
 
 if __name__ == "__main__":
