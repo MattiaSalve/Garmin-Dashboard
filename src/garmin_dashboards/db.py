@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS activities (
     max_power_w           REAL,
     training_stress_score REAL,
     training_load         REAL,
+    hr_zone1_s           REAL,
+    hr_zone2_s           REAL,
+    hr_zone3_s           REAL,
+    hr_zone4_s           REAL,
+    hr_zone5_s           REAL,
     aerobic_te            REAL,
     anaerobic_te          REAL,
     vo2max                REAL,
@@ -45,7 +50,17 @@ CREATE TABLE IF NOT EXISTS activities (
 """
 
 # Columns added after the first release; applied to existing databases by init_db.
-MIGRATION_COLUMNS = {"last_synced": "TEXT", "raw_json": "TEXT", "training_load": "REAL"}
+MIGRATION_COLUMNS = {
+    "last_synced": "TEXT",
+    "raw_json": "TEXT",
+    "training_load": "REAL",
+    **{f"hr_zone{i}_s": "REAL" for i in range(1, 6)},
+}
+# Columns that can be rebuilt from raw_json for rows stored before the column existed.
+BACKFILL_FROM_RAW = {
+    "training_load": "activityTrainingLoad",
+    **{f"hr_zone{i}_s": f"hrTimeInZone_{i}" for i in range(1, 6)},
+}
 
 
 
@@ -72,6 +87,7 @@ def to_row(a: dict, user_email: str, synced_at: str | None = None) -> dict:
         "max_power_w": a.get("maxPower"),
         "training_stress_score": a.get("trainingStressScore"),
         "training_load": a.get("activityTrainingLoad"),
+        **{f"hr_zone{i}_s": a.get(f"hrTimeInZone_{i}") for i in range(1, 6)},
         "aerobic_te": a.get("aerobicTrainingEffect"),
         "anaerobic_te": a.get("anaerobicTrainingEffect"),
         "vo2max": a.get("vO2MaxValue"),
@@ -94,10 +110,11 @@ def init_db(db_path: str = DB_NAME) -> None:
             if col not in existing:
                 conn.execute(f"ALTER TABLE activities ADD COLUMN {col} {typ}")
         # Backfill columns that were added after rows were stored, from the raw JSON.
-        conn.execute(
-            "UPDATE activities SET training_load = json_extract(raw_json, '$.activityTrainingLoad') "
-            "WHERE training_load IS NULL AND raw_json IS NOT NULL"
-        )
+        for col, key in BACKFILL_FROM_RAW.items():
+            conn.execute(
+                f"UPDATE activities SET {col} = json_extract(raw_json, '$.{key}') "
+                f"WHERE {col} IS NULL AND raw_json IS NOT NULL"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_activities_start ON activities (start_time_local)"
         )

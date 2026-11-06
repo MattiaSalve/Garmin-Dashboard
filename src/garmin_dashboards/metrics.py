@@ -139,3 +139,72 @@ def daily_training_load(db_path: str = DB_NAME) -> list[dict]:
             """
         ).fetchall()
     return [{"day": r["day"], "load": r["load"]} for r in rows]
+
+
+def weekly_hr_zones(start: date, end: date, sport: str | None = None, db_path: str = DB_NAME) -> list[dict]:
+    """Hours spent in each heart-rate zone per week (activities without zone data are skipped)."""
+    params = {"start": start.isoformat(), "end": end.isoformat(), "sport": sport}
+    sums = ", ".join(f"COALESCE(SUM(hr_zone{i}_s), 0) AS z{i}" for i in range(1, 6))
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT date(start_time_local, 'weekday 0', '-6 days') AS week_start, {sums}
+            FROM activities
+            {_FILTER} AND hr_zone1_s IS NOT NULL
+            GROUP BY week_start
+            ORDER BY week_start
+            """,
+            params,
+        ).fetchall()
+    return [
+        {"week_start": r["week_start"], **{f"Zone {i}": r[f"z{i}"] / 3600 for i in range(1, 6)}}
+        for r in rows
+    ]
+
+
+# Durations (seconds) Garmin reports best average power for, in raw_json as maxAvgPower_<seconds>.
+POWER_CURVE_SECONDS = [1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 1200, 1800, 3600, 7200]
+
+
+def power_curve(start: date, end: date, sport: str | None = None, db_path: str = DB_NAME) -> list[dict]:
+    """Best average power per duration over the range, from Garmin's per-activity bests."""
+    params = {"start": start.isoformat(), "end": end.isoformat(), "sport": sport}
+    # Column names come from the constant list above, never from user input.
+    bests = ", ".join(
+        f"MAX(json_extract(raw_json, '$.maxAvgPower_{d}')) AS p{d}" for d in POWER_CURVE_SECONDS
+    )
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT {bests} FROM activities {_FILTER} AND raw_json IS NOT NULL", params
+        ).fetchone()
+    return [
+        {"seconds": d, "watts": row[f"p{d}"]} for d in POWER_CURVE_SECONDS if row[f"p{d}"] is not None
+    ]
+
+
+def daily_totals(start: date, end: date, sport: str | None = None, db_path: str = DB_NAME) -> list[dict]:
+    """Per-day distance and moving time, for the calendar heatmap."""
+    params = {"start": start.isoformat(), "end": end.isoformat(), "sport": sport}
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT date(start_time_local) AS day,
+                   COUNT(*) AS activity_count,
+                   COALESCE(SUM(distance_m), 0) AS total_distance_m,
+                   COALESCE(SUM(moving_duration_s), 0) AS total_moving_duration_s
+            FROM activities
+            {_FILTER}
+            GROUP BY day
+            ORDER BY day
+            """,
+            params,
+        ).fetchall()
+    return [
+        {
+            "day": r["day"],
+            "activity_count": r["activity_count"],
+            "distance_km": r["total_distance_m"] / 1000,
+            "hours": r["total_moving_duration_s"] / 3600,
+        }
+        for r in rows
+    ]

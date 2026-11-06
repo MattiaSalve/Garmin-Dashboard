@@ -15,7 +15,7 @@ from garminconnect.activity_details import parse_activity_detail_metrics
 from garmin_dashboards import auth
 from garmin_dashboards.db import DB_NAME, init_db
 from garmin_dashboards.fitness import fitness_series
-from garmin_dashboards.metrics import by_sport, daily_training_load, summary, weekly_totals
+from garmin_dashboards.metrics import by_sport, daily_totals, daily_training_load, power_curve, summary, weekly_hr_zones, weekly_totals
 from garmin_dashboards.sync import sync
 
 
@@ -381,6 +381,97 @@ def show_fitness_chart(start: date, end: date) -> None:
     st.altair_chart(chart, width="stretch")
 
 
+ZONE_COLORS = ["#90caf9", "#66bb6a", "#fdd835", "#fb8c00", "#e53935"]
+
+
+def show_hr_zones(start: date, end: date, sport: str | None) -> None:
+    """Weekly time in heart-rate zones, plus the overall zone split for the range."""
+    weekly = pd.DataFrame(weekly_hr_zones(start, end, sport))
+    st.subheader("Heart-rate zones")
+    if weekly.empty:
+        st.info("No heart-rate zone data in this range.")
+        return
+    zones = [f"Zone {i}" for i in range(1, 6)]
+    long = weekly.melt(id_vars="week_start", value_vars=zones, var_name="zone", value_name="hours")
+    scale = alt.Scale(domain=zones, range=ZONE_COLORS)
+    chart = (
+        alt.Chart(long)
+        .mark_bar()
+        .encode(
+            x=alt.X("week_start:N", title="Week of", sort=None),
+            y=alt.Y("hours:Q", title="Hours"),
+            color=alt.Color("zone:N", scale=scale, title=None),
+            order=alt.Order("zone:N"),
+            tooltip=[
+                alt.Tooltip("week_start:N", title="Week of"),
+                "zone:N",
+                alt.Tooltip("hours:Q", format=".1f"),
+            ],
+        )
+        .properties(height=300)
+    )
+    st.altair_chart(chart, width="stretch")
+
+    totals = weekly[zones].sum()
+    share = totals / totals.sum() if totals.sum() else totals
+    cols = st.columns(5)
+    for col, zone in zip(cols, zones):
+        col.metric(zone, f"{share[zone] * 100:.0f}%", f"{totals[zone]:.1f} h", delta_color="off")
+    st.caption("Zones as defined on your Garmin device. Rides without heart-rate data are skipped.")
+
+
+def show_power_curve(start: date, end: date, sport: str | None) -> None:
+    """Best average power for each duration over the selected range."""
+    points = pd.DataFrame(power_curve(start, end, sport))
+    if points.empty:
+        return
+    st.subheader("Power curve")
+    points["label"] = points["seconds"].map(
+        lambda s: f"{s}s" if s < 60 else f"{s // 60}min" if s < 3600 else f"{s // 3600}h"
+    )
+    chart = (
+        alt.Chart(points)
+        .mark_line(point=True, color="#fb8c00")
+        .encode(
+            x=alt.X("seconds:Q", scale=alt.Scale(type="log"), title="Duration",
+                    axis=alt.Axis(values=points["seconds"].tolist(), labelExpr="datum.value < 60 ? datum.value + 's' : datum.value < 3600 ? datum.value / 60 + 'min' : datum.value / 3600 + 'h'")),
+            y=alt.Y("watts:Q", title="Best average power (W)", scale=alt.Scale(zero=False)),
+            tooltip=[alt.Tooltip("label:N", title="Duration"), alt.Tooltip("watts:Q", format=".0f")],
+        )
+        .properties(height=300)
+    )
+    st.altair_chart(chart, width="stretch")
+    st.caption("Best average power over each duration, across rides with a power meter in this range.")
+
+
+def show_calendar(start: date, end: date, sport: str | None) -> None:
+    """GitHub-style heatmap of daily distance."""
+    days = pd.DataFrame(daily_totals(start, end, sport))
+    if days.empty:
+        return
+    st.subheader("Activity calendar")
+    days["day"] = pd.to_datetime(days["day"])
+    days["week"] = (days["day"] - pd.to_timedelta(days["day"].dt.weekday, unit="D")).dt.strftime("%Y-%m-%d")
+    days["weekday"] = days["day"].dt.strftime("%a")
+    chart = (
+        alt.Chart(days)
+        .mark_rect(cornerRadius=2)
+        .encode(
+            x=alt.X("week:O", title=None, axis=alt.Axis(labels=False, ticks=False)),
+            y=alt.Y("weekday:O", title=None, sort=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]),
+            color=alt.Color("distance_km:Q", title="km", scale=alt.Scale(scheme="blues")),
+            tooltip=[
+                alt.Tooltip("day:T", title="Date"),
+                alt.Tooltip("distance_km:Q", title="km", format=".1f"),
+                alt.Tooltip("hours:Q", format=".1f"),
+                alt.Tooltip("activity_count:Q", title="Activities"),
+            ],
+        )
+        .properties(height=200)
+    )
+    st.altair_chart(chart, width="stretch")
+
+
 def show_dashboard(start: date, end: date, sport: str | None) -> None:
     s = summary(start, end, sport)
     if s["activity_count"] == 0:
@@ -438,6 +529,9 @@ def show_dashboard(start: date, end: date, sport: str | None) -> None:
         st.bar_chart(sports.set_index("sport_type")[["total_moving_duration_h"]])
 
     show_fitness_chart(start, end)
+    show_hr_zones(start, end, sport)
+    show_power_curve(start, end, sport)
+    show_calendar(start, end, sport)
 
     week_start = selected_week(event)
     st.subheader("Rides")
