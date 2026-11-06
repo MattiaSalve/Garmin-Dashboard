@@ -31,6 +31,7 @@ def summary(start: date, end: date, sport: str | None = None, db_path: str = DB_
                 COALESCE(SUM(elevation_gain_m), 0)         AS total_elevation_gain_m,
                 COALESCE(SUM(calories), 0)                 AS total_calories,
                 COALESCE(SUM(training_stress_score), 0)    AS total_training_stress,
+                COALESCE(SUM(training_load), 0)            AS total_training_load,
                 AVG(avg_hr)                                AS avg_hr,
                 MAX(max_hr)                                AS max_hr,
                 AVG(avg_power_w)                           AS avg_power_w,
@@ -52,6 +53,7 @@ def summary(start: date, end: date, sport: str | None = None, db_path: str = DB_
         "total_elevation_gain_m": row["total_elevation_gain_m"],
         "total_calories": row["total_calories"],
         "total_training_stress": row["total_training_stress"],
+        "total_training_load": row["total_training_load"],
         "avg_distance_km": (distance / 1000 / count) if count else None,
         "avg_moving_duration_min": (moving / 60 / count) if count else None,
         # Average speed over moving time, in km/h.
@@ -102,7 +104,8 @@ def weekly_totals(start: date, end: date, sport: str | None = None, db_path: str
                    COUNT(*)                                       AS activity_count,
                    COALESCE(SUM(distance_m), 0)                   AS total_distance_m,
                    COALESCE(SUM(moving_duration_s), 0)            AS total_moving_duration_s,
-                   COALESCE(SUM(training_stress_score), 0)        AS total_training_stress
+                   COALESCE(SUM(training_stress_score), 0)        AS total_training_stress,
+                   COALESCE(SUM(training_load), 0)                AS total_training_load
             FROM activities
             {_FILTER}
             GROUP BY week_start
@@ -117,6 +120,22 @@ def weekly_totals(start: date, end: date, sport: str | None = None, db_path: str
             "total_distance_km": r["total_distance_m"] / 1000,
             "total_moving_duration_h": r["total_moving_duration_s"] / 3600,
             "total_training_stress": r["total_training_stress"],
+            "total_training_load": r["total_training_load"],
         }
         for r in rows
     ]
+
+
+def daily_training_load(db_path: str = DB_NAME) -> list[dict]:
+    """Total training load per local calendar day, across all sports and all time."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT date(start_time_local) AS day, SUM(training_load) AS load
+            FROM activities
+            WHERE training_load IS NOT NULL
+            GROUP BY day
+            ORDER BY day
+            """
+        ).fetchall()
+    return [{"day": r["day"], "load": r["load"]} for r in rows]

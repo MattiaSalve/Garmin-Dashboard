@@ -14,7 +14,8 @@ from garminconnect.activity_details import parse_activity_detail_metrics
 
 from garmin_dashboards import auth
 from garmin_dashboards.db import DB_NAME, init_db
-from garmin_dashboards.metrics import by_sport, summary, weekly_totals
+from garmin_dashboards.fitness import fitness_series
+from garmin_dashboards.metrics import by_sport, daily_training_load, summary, weekly_totals
 from garmin_dashboards.sync import sync
 
 
@@ -350,6 +351,36 @@ def sidebar(email: str) -> None:
             st.rerun()
 
 
+def show_fitness_chart(start: date, end: date) -> None:
+    """Fitness (CTL), fatigue (ATL) and form (TSB) from Garmin training load, all sports."""
+    daily = {date.fromisoformat(r["day"]): r["load"] for r in daily_training_load()}
+    series = [r for r in fitness_series(daily, end=max(end, max(daily, default=end))) if start <= r["day"] <= end]
+    st.subheader("Fitness, fatigue and form")
+    if not series:
+        st.info("No training load data in this range.")
+        return
+    st.caption(
+        "Built from Garmin's per-activity training load across all sports. "
+        "Fitness = 42-day average, fatigue = 7-day average, form = fitness minus fatigue."
+    )
+    df = pd.DataFrame(series).melt(
+        id_vars="day", value_vars=["fitness", "fatigue", "form"], var_name="metric", value_name="value"
+    )
+    colors = alt.Scale(domain=["fitness", "fatigue", "form"], range=["#1e88e5", "#e53935", "#43a047"])
+    chart = (
+        alt.Chart(df)
+        .mark_line()
+        .encode(
+            x=alt.X("day:T", title=None),
+            y=alt.Y("value:Q", title="Load"),
+            color=alt.Color("metric:N", scale=colors, title=None),
+            tooltip=[alt.Tooltip("day:T"), "metric:N", alt.Tooltip("value:Q", format=".1f")],
+        )
+        .properties(height=300)
+    )
+    st.altair_chart(chart, width="stretch")
+
+
 def show_dashboard(start: date, end: date, sport: str | None) -> None:
     s = summary(start, end, sport)
     if s["activity_count"] == 0:
@@ -366,7 +397,7 @@ def show_dashboard(start: date, end: date, sport: str | None) -> None:
     c5.metric("Elevation gain", f"{s['total_elevation_gain_m']:,.0f} m")
     c6.metric("Avg distance", f"{s['avg_distance_km']:,.1f} km")
     c7.metric("Avg heart rate", f"{s['avg_hr']:,.0f} bpm" if s["avg_hr"] else "–")
-    c8.metric("Training stress", f"{s['total_training_stress']:,.0f}")
+    c8.metric("Training load", f"{s['total_training_load']:,.0f}")
 
     weekly = pd.DataFrame(weekly_totals(start, end, sport))
     st.subheader("Weekly distance (km)")
@@ -398,13 +429,15 @@ def show_dashboard(start: date, end: date, sport: str | None) -> None:
 
     left, right = st.columns(2)
     with left:
-        st.subheader("Weekly training stress")
-        st.bar_chart(weekly.set_index("week_start")[["total_training_stress"]])
+        st.subheader("Weekly training load")
+        st.bar_chart(weekly.set_index("week_start")[["total_training_load"]])
     with right:
         st.subheader("Time by sport (hours)")
         sports = pd.DataFrame(by_sport(start, end))
         sports["sport_type"] = sports["sport_type"].map(display_sport)
         st.bar_chart(sports.set_index("sport_type")[["total_moving_duration_h"]])
+
+    show_fitness_chart(start, end)
 
     week_start = selected_week(event)
     st.subheader("Rides")

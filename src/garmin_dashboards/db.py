@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS activities (
     norm_power_w          REAL,
     max_power_w           REAL,
     training_stress_score REAL,
+    training_load         REAL,
     aerobic_te            REAL,
     anaerobic_te          REAL,
     vo2max                REAL,
@@ -44,7 +45,7 @@ CREATE TABLE IF NOT EXISTS activities (
 """
 
 # Columns added after the first release; applied to existing databases by init_db.
-MIGRATION_COLUMNS = {"last_synced": "TEXT", "raw_json": "TEXT"}
+MIGRATION_COLUMNS = {"last_synced": "TEXT", "raw_json": "TEXT", "training_load": "REAL"}
 
 
 
@@ -70,6 +71,7 @@ def to_row(a: dict, user_email: str, synced_at: str | None = None) -> dict:
         "norm_power_w": a.get("normPower"),
         "max_power_w": a.get("maxPower"),
         "training_stress_score": a.get("trainingStressScore"),
+        "training_load": a.get("activityTrainingLoad"),
         "aerobic_te": a.get("aerobicTrainingEffect"),
         "anaerobic_te": a.get("anaerobicTrainingEffect"),
         "vo2max": a.get("vO2MaxValue"),
@@ -91,6 +93,11 @@ def init_db(db_path: str = DB_NAME) -> None:
         for col, typ in MIGRATION_COLUMNS.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE activities ADD COLUMN {col} {typ}")
+        # Backfill columns that were added after rows were stored, from the raw JSON.
+        conn.execute(
+            "UPDATE activities SET training_load = json_extract(raw_json, '$.activityTrainingLoad') "
+            "WHERE training_load IS NULL AND raw_json IS NOT NULL"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_activities_start ON activities (start_time_local)"
         )
