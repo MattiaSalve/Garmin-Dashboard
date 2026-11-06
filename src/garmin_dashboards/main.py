@@ -13,11 +13,11 @@ import streamlit as st
 from garminconnect.activity_details import parse_activity_detail_metrics
 
 from garmin_dashboards import auth
-from garmin_dashboards.db import DB_NAME, init_db, save_activities
+from garmin_dashboards.db import DB_NAME, init_db
 from garmin_dashboards.metrics import by_sport, summary, weekly_totals
+from garmin_dashboards.sync import sync
 
 
-PAGE_SIZE = 100
 DEFAULT_RANGE_DAYS = 365
 
 # (title, unit, candidate Garmin keys in priority order, factor to convert to the unit)
@@ -48,21 +48,6 @@ def fmt_seconds_hm(seconds: float | None) -> str | None:
         return None
     minutes = round(seconds / 60)
     return f"{minutes // 60}:{minutes % 60:02d}"
-
-
-def fetch_all_activities(api) -> list[dict]:
-    """Page through the Garmin activity list until it runs out."""
-    activities: list[dict] = []
-    start = 0
-    while True:
-        batch = api.get_activities(start, PAGE_SIZE)
-        if not batch:
-            break
-        activities.extend(batch)
-        if len(batch) < PAGE_SIZE:
-            break
-        start += PAGE_SIZE
-    return activities
 
 
 def sign_in_form() -> None:
@@ -330,16 +315,29 @@ def show_ride_charts(activity_id: int) -> None:
         st.altair_chart(chart, width="stretch")
 
 
+def auto_sync(email: str) -> None:
+    """Sync once per browser session, right after sign-in."""
+    if st.session_state.get("auto_synced"):
+        return
+    st.session_state.auto_synced = True
+    try:
+        with st.spinner("Syncing new activities from Garmin..."):
+            new, _ = sync(st.session_state.api, email)
+        st.toast(f"{new} new activities synced." if new else "Already up to date.")
+    except Exception as exc:
+        st.warning(f"Automatic sync failed: {exc}")
+
+
 def sidebar(email: str) -> None:
     with st.sidebar:
         st.write(f"Signed in as **{email}**")
 
+        full = st.checkbox("Full re-sync", help="Re-download the entire history.")
         if st.button("Sync from Garmin"):
             try:
                 with st.spinner("Downloading activities..."):
-                    activities = fetch_all_activities(st.session_state.api)
-                    save_activities(activities, email)
-                st.success(f"Saved {len(activities)} activities.")
+                    new, fetched = sync(st.session_state.api, email, full=full)
+                st.success(f"{new} new activities ({fetched} fetched).")
             except Exception as exc:
                 st.error(f"Sync failed: {exc}")
 
@@ -348,6 +346,7 @@ def sidebar(email: str) -> None:
             auth.forget(st.session_state.api)
             st.session_state.pop("api", None)
             st.session_state.pop("email", None)
+            st.session_state.pop("auto_synced", None)
             st.rerun()
 
 
@@ -443,6 +442,7 @@ def main() -> None:
         return
 
     email = st.session_state.email
+    auto_sync(email)
     sidebar(email)
 
     today = date.today()

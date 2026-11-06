@@ -1,6 +1,8 @@
 """SQLite storage for Garmin activities. All stored values are metric."""
 
+import json
 import sqlite3
+from datetime import datetime, timezone
 
 DB_NAME = "garmin_data.db"
 
@@ -35,12 +37,18 @@ CREATE TABLE IF NOT EXISTS activities (
     end_lat               REAL,
     end_lon               REAL,
     location_name         TEXT,
-    user_email            TEXT
+    user_email            TEXT,
+    last_synced           TEXT,
+    raw_json              TEXT
 )
 """
 
+# Columns added after the first release; applied to existing databases by init_db.
+MIGRATION_COLUMNS = {"last_synced": "TEXT", "raw_json": "TEXT"}
 
-def to_row(a: dict, user_email: str) -> dict:
+
+
+def to_row(a: dict, user_email: str, synced_at: str | None = None) -> dict:
     return {
         "activity_id": a["activityId"],
         "activity_uuid": a.get("activityUUID"),
@@ -71,22 +79,43 @@ def to_row(a: dict, user_email: str) -> dict:
         "end_lon": a.get("endLongitude"),
         "location_name": a.get("locationName"),
         "user_email": user_email,
+        "last_synced": synced_at,
+        "raw_json": json.dumps(a),
     }
 
 
 def init_db(db_path: str = DB_NAME) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(SCHEMA)
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(activities)")}
+        for col, typ in MIGRATION_COLUMNS.items():
+            if col not in existing:
+                conn.execute(f"ALTER TABLE activities ADD COLUMN {col} {typ}")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_activities_start ON activities (start_time_local)"
+        )
+
+
+def known_activity_ids(user_email: str, db_path: str = DB_NAME) -> set[int]:
+    init_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT activity_id FROM activities WHERE user_email = ?", (user_email,)
+        ).fetchall()
+    return {r[0] for r in rows}
 
 
 def save_activities(activities: list[dict], user_email: str, db_path: str = DB_NAME) -> None:
     if not activities:
         return
-    rows = [to_row(a, user_email) for a in activities]
+    synced_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    rows = [to_row(a, user_email, synced_at) for a in activities]
     cols = list(rows[0].keys())
+    updates = ", ".join(f"{c} = excluded.{c}" for c in cols if c != "activity_id")
     sql = (
-        f"INSERT OR REPLACE INTO activities ({', '.join(cols)}) "
-        f"VALUES ({', '.join(':' + c for c in cols)})"
+        f"INSERT INTO activities ({', '.join(cols)}) "
+        f"VALUES ({', '.join(':' + c for c in cols)}) "
+        f"ON CONFLICT(activity_id) DO UPDATE SET {updates}"
     )
     init_db(db_path)
     with sqlite3.connect(db_path) as conn:
