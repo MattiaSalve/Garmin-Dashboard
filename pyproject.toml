@@ -1,16 +1,17 @@
 [project]
 name = "garmin-dashboards"
 version = "0.1.0"
-description = "Personal Streamlit dashboard for Garmin Connect activities"
+description = "Personal dashboard (FastAPI + React) for Garmin Connect activities"
 readme = "README.md"
 requires-python = ">=3.15"
 dependencies = [
-    "altair>=5",
     "curl-cffi>=0.17.0",
+    "fastapi>=0.162.2",
     "garminconnect>=0.3.20",
+    "httpx>=0.28.1",
     "pandas>=3.1.0",
     "pydantic>=2.14.3",
-    "streamlit>=1.66.1",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [project.scripts]

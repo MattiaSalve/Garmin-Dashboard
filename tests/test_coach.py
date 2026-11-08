@@ -32,7 +32,6 @@ def reply(content, finish="stop"):
 
 
 def test_ask_coach_returns_parsed_advice(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     seen = {}
 
     def post(body, key):
@@ -40,7 +39,7 @@ def test_ask_coach_returns_parsed_advice(monkeypatch):
         return reply(json.dumps({"summary": "Easy day.", "agree_with_suggestion": True,
                                  "adjusted_steps": None, "cautions": []}))
 
-    advice = coach.ask_coach(payload(), model="some/model", post=post)
+    advice = coach.ask_coach(payload(), model="some/model", post=post, api_key="k")
     assert advice.summary == "Easy day." and seen["key"] == "k"
     assert seen["body"]["model"] == "some/model"
     assert "@" not in json.dumps(seen["body"]["messages"][1])
@@ -48,10 +47,18 @@ def test_ask_coach_returns_parsed_advice(monkeypatch):
 
 def test_ask_coach_errors(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    with pytest.raises(coach.CoachError, match="not set"):
+    with pytest.raises(coach.CoachError, match="API key"):
         coach.ask_coach(payload())
-    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     with pytest.raises(coach.CoachError, match="declined"):
-        coach.ask_coach(payload(), post=lambda b, k: reply("", "content_filter"))
+        coach.ask_coach(payload(), post=lambda b, k: reply("", "content_filter"), api_key="k")
     with pytest.raises(coach.CoachError, match="unexpected"):
-        coach.ask_coach(payload(), post=lambda b, k: reply("not json"))
+        coach.ask_coach(payload(), post=lambda b, k: reply("not json"), api_key="k")
+
+
+def test_env_key_is_only_used_in_local_mode(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "server-key")
+    monkeypatch.delenv("GARMIN_DASHBOARDS_LOCAL", raising=False)
+    assert not coach.is_available() and coach.is_available(" mine ")
+    assert coach.resolve_key("mine") == "mine"
+    monkeypatch.setenv("GARMIN_DASHBOARDS_LOCAL", "1")
+    assert coach.resolve_key() == "server-key" and coach.resolve_key("mine") == "mine"

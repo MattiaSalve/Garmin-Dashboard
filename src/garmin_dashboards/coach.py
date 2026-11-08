@@ -11,6 +11,7 @@ import urllib.request
 
 from pydantic import BaseModel, ValidationError
 
+from garmin_dashboards.mode import is_local
 from garmin_dashboards.readiness import Readiness
 from garmin_dashboards.workouts import Suggestion
 
@@ -59,8 +60,16 @@ class CoachError(RuntimeError):
     pass
 
 
-def is_available() -> bool:
-    return bool(os.environ.get("OPENROUTER_API_KEY"))
+def resolve_key(api_key: str | None = None) -> str | None:
+    """The user's own key; in local mode the OPENROUTER_API_KEY environment variable is the fallback."""
+    key = (api_key or "").strip()
+    if not key and is_local():
+        key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    return key or None
+
+
+def is_available(api_key: str | None = None) -> bool:
+    return resolve_key(api_key) is not None
 
 
 def build_payload(
@@ -113,7 +122,7 @@ def _post(body: dict, key: str) -> dict:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
-            raise CoachError("OpenRouter rejected the API key. Check OPENROUTER_API_KEY.") from exc
+            raise CoachError("OpenRouter rejected the API key. Check your OpenRouter API key.") from exc
         if exc.code == 402:
             raise CoachError("OpenRouter account is out of credits.") from exc
         if exc.code == 429:
@@ -123,10 +132,10 @@ def _post(body: dict, key: str) -> dict:
         raise CoachError("Couldn't reach OpenRouter. Check your connection.") from exc
 
 
-def ask_coach(payload: dict, model: str | None = None, post=_post) -> CoachAdvice:
-    key = os.environ.get("OPENROUTER_API_KEY")
+def ask_coach(payload: dict, model: str | None = None, post=_post, api_key: str | None = None) -> CoachAdvice:
+    key = resolve_key(api_key)
     if not key:
-        raise CoachError("OPENROUTER_API_KEY is not set.")
+        raise CoachError("Enter your OpenRouter API key first.")
     schema = json.dumps(CoachAdvice.model_json_schema())
     body = {
         "model": model or DEFAULT_MODEL,

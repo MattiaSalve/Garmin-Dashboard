@@ -29,11 +29,10 @@ def test_incremental_fetch_stops_at_known_page():
     assert api.calls == 1
 
 
-def test_sync_counts_new_and_upserts(tmp_path, monkeypatch):
+def test_sync_counts_new_and_upserts(tmp_path, request):
     path = str(tmp_path / "t.db")
-    monkeypatch.setattr(db, "DB_NAME", path)
-    monkeypatch.setattr(db.known_activity_ids, "__defaults__", (path,))
-    monkeypatch.setattr(db.save_activities, "__defaults__", (path,))
+    token = db._active_db.set(path)
+    request.addfinalizer(lambda: db._active_db.reset(token))
     assert sync(FakeApi([3, 2, 1]), "me") == (3, 3)
     assert sync(FakeApi([4, 3, 2, 1]), "me") == (1, 4)
     with sqlite3.connect(path) as conn:

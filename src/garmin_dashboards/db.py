@@ -1,10 +1,61 @@
 """SQLite storage for Garmin activities. All stored values are metric."""
 
+import hashlib
 import json
+import os
+import shutil
 import sqlite3
+from contextvars import ContextVar
 from datetime import datetime, timezone
+from pathlib import Path
 
-DB_NAME = "garmin_data.db"
+# Each signed-in user gets their own database file, so nobody ever sees another user's data.
+DATA_DIR = Path(os.environ.get("GARMIN_DASHBOARDS_DATA") or "data")
+LEGACY_DB = Path("garmin_data.db")  # the old single-user file, adopted by its owner on first sign-in
+
+_active_db: ContextVar[str | None] = ContextVar("active_db", default=None)
+
+
+def user_db_path(email: str) -> str:
+    digest = hashlib.sha256(email.strip().lower().encode()).hexdigest()[:20]
+    return str(DATA_DIR / f"{digest}.db")
+
+
+def ensure_user_db(email: str) -> str:
+    """Path of `email`'s database, adopting the old single-user file if it is theirs."""
+    path = Path(user_db_path(email))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists() and _legacy_belongs_to(email):
+        shutil.copy2(LEGACY_DB, path)
+    return str(path)
+
+
+def use_user(email: str) -> str:
+    """Make `email`'s database the default for this script run (call at the top of each run)."""
+    path = ensure_user_db(email)
+    _active_db.set(path)
+    return path
+
+
+def _legacy_belongs_to(email: str) -> bool:
+    if not LEGACY_DB.exists():
+        return False
+    try:
+        with sqlite3.connect(LEGACY_DB) as conn:
+            owners = {r[0] for r in conn.execute("SELECT DISTINCT user_email FROM activities")}
+    except sqlite3.Error:
+        return False
+    return owners == {email}
+
+
+def resolve(db_path: str | None = None) -> str:
+    """The explicit path if given, else the signed-in user's database."""
+    if db_path is not None:
+        return str(db_path)
+    active = _active_db.get()
+    if active is None:
+        raise RuntimeError("No user is signed in, so there is no database to use.")
+    return active
 
 # All units are metric (meters, seconds, m/s, meters above sea level, watts, bpm, kcal).
 SCHEMA = """
@@ -137,8 +188,8 @@ def to_row(a: dict, user_email: str, synced_at: str | None = None) -> dict:
     }
 
 
-def init_db(db_path: str = DB_NAME) -> None:
-    with sqlite3.connect(db_path) as conn:
+def init_db(db_path: str | None = None) -> None:
+    with sqlite3.connect(resolve(db_path)) as conn:
         conn.execute(SCHEMA)
         existing = {r[1] for r in conn.execute("PRAGMA table_info(activities)")}
         for col, typ in MIGRATION_COLUMNS.items():
@@ -157,13 +208,13 @@ def init_db(db_path: str = DB_NAME) -> None:
         conn.execute(SETTINGS_SCHEMA)
 
 
-def save_wellness(days: dict[str, dict], db_path: str = DB_NAME) -> None:
+def save_wellness(days: dict[str, dict], db_path: str | None = None) -> None:
     """Upsert wellness rows keyed by day. Only the given columns are overwritten."""
     if not days:
         return
     synced_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     init_db(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(resolve(db_path)) as conn:
         for day, values in days.items():
             row = {**values, "day": day, "last_synced": synced_at}
             cols = list(row)
@@ -175,24 +226,24 @@ def save_wellness(days: dict[str, dict], db_path: str = DB_NAME) -> None:
             )
 
 
-def last_wellness_day(db_path: str = DB_NAME) -> str | None:
+def last_wellness_day(db_path: str | None = None) -> str | None:
     init_db(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(resolve(db_path)) as conn:
         return conn.execute("SELECT MAX(day) FROM wellness").fetchone()[0]
 
 
-def get_setting(key: str, db_path: str = DB_NAME) -> float | None:
+def get_setting(key: str, db_path: str | None = None) -> float | None:
     init_db(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(resolve(db_path)) as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     if row is None or row[0] in (None, ""):
         return SETTING_DEFAULTS.get(key)
     return float(row[0])
 
 
-def set_setting(key: str, value: float | None, db_path: str = DB_NAME) -> None:
+def set_setting(key: str, value: float | None, db_path: str | None = None) -> None:
     init_db(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(resolve(db_path)) as conn:
         conn.execute(
             "INSERT INTO settings (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -200,20 +251,20 @@ def set_setting(key: str, value: float | None, db_path: str = DB_NAME) -> None:
         )
 
 
-def all_settings(db_path: str = DB_NAME) -> dict[str, float | None]:
+def all_settings(db_path: str | None = None) -> dict[str, float | None]:
     return {k: get_setting(k, db_path) for k in SETTING_DEFAULTS}
 
 
-def known_activity_ids(user_email: str, db_path: str = DB_NAME) -> set[int]:
+def known_activity_ids(user_email: str, db_path: str | None = None) -> set[int]:
     init_db(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(resolve(db_path)) as conn:
         rows = conn.execute(
             "SELECT activity_id FROM activities WHERE user_email = ?", (user_email,)
         ).fetchall()
     return {r[0] for r in rows}
 
 
-def save_activities(activities: list[dict], user_email: str, db_path: str = DB_NAME) -> None:
+def save_activities(activities: list[dict], user_email: str, db_path: str | None = None) -> None:
     if not activities:
         return
     synced_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -226,5 +277,5 @@ def save_activities(activities: list[dict], user_email: str, db_path: str = DB_N
         f"ON CONFLICT(activity_id) DO UPDATE SET {updates}"
     )
     init_db(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(resolve(db_path)) as conn:
         conn.executemany(sql, rows)

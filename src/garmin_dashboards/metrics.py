@@ -3,7 +3,8 @@
 import sqlite3
 from datetime import date, timedelta
 
-DB_NAME = "garmin_data.db"
+from garmin_dashboards.db import resolve
+
 
 # Shared WHERE clause: inclusive date range on the local start date, optional sport filter.
 _FILTER = """
@@ -12,13 +13,13 @@ _FILTER = """
 """
 
 
-def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+def _connect(db_path: str | None) -> sqlite3.Connection:
+    conn = sqlite3.connect(resolve(db_path))
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def summary(start: date, end: date, sport: str | None = None, db_path: str = DB_NAME) -> dict:
+def summary(start: date, end: date, sport: str | None = None, db_path: str | None = None) -> dict:
     """Totals and averages for activities between start and end (inclusive)."""
     params = {"start": start.isoformat(), "end": end.isoformat(), "sport": sport}
     with _connect(db_path) as conn:
@@ -66,7 +67,7 @@ def summary(start: date, end: date, sport: str | None = None, db_path: str = DB_
     }
 
 
-def by_sport(start: date, end: date, db_path: str = DB_NAME) -> list[dict]:
+def by_sport(start: date, end: date, db_path: str | None = None) -> list[dict]:
     """Per-sport breakdown (count, distance, moving time) for the date range."""
     params = {"start": start.isoformat(), "end": end.isoformat(), "sport": None}
     with _connect(db_path) as conn:
@@ -94,7 +95,7 @@ def by_sport(start: date, end: date, db_path: str = DB_NAME) -> list[dict]:
     ]
 
 
-def weekly_totals(start: date, end: date, sport: str | None = None, db_path: str = DB_NAME) -> list[dict]:
+def weekly_totals(start: date, end: date, sport: str | None = None, db_path: str | None = None) -> list[dict]:
     """Per-week totals (weeks start on Monday), for trend charts."""
     params = {"start": start.isoformat(), "end": end.isoformat(), "sport": sport}
     with _connect(db_path) as conn:
@@ -126,7 +127,7 @@ def weekly_totals(start: date, end: date, sport: str | None = None, db_path: str
     ]
 
 
-def daily_training_load(db_path: str = DB_NAME) -> list[dict]:
+def daily_training_load(db_path: str | None = None) -> list[dict]:
     """Total training load per local calendar day, across all sports and all time."""
     with _connect(db_path) as conn:
         rows = conn.execute(
@@ -141,7 +142,7 @@ def daily_training_load(db_path: str = DB_NAME) -> list[dict]:
     return [{"day": r["day"], "load": r["load"]} for r in rows]
 
 
-def weekly_hr_zones(start: date, end: date, sport: str | None = None, db_path: str = DB_NAME) -> list[dict]:
+def weekly_hr_zones(start: date, end: date, sport: str | None = None, db_path: str | None = None) -> list[dict]:
     """Hours spent in each heart-rate zone per week (activities without zone data are skipped)."""
     params = {"start": start.isoformat(), "end": end.isoformat(), "sport": sport}
     sums = ", ".join(f"COALESCE(SUM(hr_zone{i}_s), 0) AS z{i}" for i in range(1, 6))
@@ -166,7 +167,7 @@ def weekly_hr_zones(start: date, end: date, sport: str | None = None, db_path: s
 POWER_CURVE_SECONDS = [1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 1200, 1800, 3600, 7200]
 
 
-def power_curve(start: date, end: date, sport: str | None = None, db_path: str = DB_NAME) -> list[dict]:
+def power_curve(start: date, end: date, sport: str | None = None, db_path: str | None = None) -> list[dict]:
     """Best average power per duration over the range, from Garmin's per-activity bests."""
     params = {"start": start.isoformat(), "end": end.isoformat(), "sport": sport}
     # Column names come from the constant list above, never from user input.
@@ -182,7 +183,7 @@ def power_curve(start: date, end: date, sport: str | None = None, db_path: str =
     ]
 
 
-def daily_totals(start: date, end: date, sport: str | None = None, db_path: str = DB_NAME) -> list[dict]:
+def daily_totals(start: date, end: date, sport: str | None = None, db_path: str | None = None) -> list[dict]:
     """Per-day distance and moving time, for the calendar heatmap."""
     params = {"start": start.isoformat(), "end": end.isoformat(), "sport": sport}
     with _connect(db_path) as conn:
@@ -238,7 +239,7 @@ def search_activities(
     max_hours: float | None = None,
     text: str | None = None,
     order: str = "Newest first",
-    db_path: str = DB_NAME,
+    db_path: str | None = None,
 ) -> list[dict]:
     """Activities matching every given filter (None = no limit)."""
     clauses, params = [], {}
@@ -278,7 +279,7 @@ def search_activities(
     return [dict(r) for r in rows]
 
 
-def distance_by_group(start: date, end: date, db_path: str = DB_NAME) -> dict[str, float]:
+def distance_by_group(start: date, end: date, db_path: str | None = None) -> dict[str, float]:
     """Kilometres per sport group (see SPORT_GROUPS) in the inclusive date range."""
     params = {"start": start.isoformat(), "end": end.isoformat(), "sport": None}
     with _connect(db_path) as conn:
@@ -290,7 +291,7 @@ def distance_by_group(start: date, end: date, db_path: str = DB_NAME) -> dict[st
     return {g: sum(by_type.get(s, 0) for s in sports) / 1000 for g, sports in SPORT_GROUPS.items()}
 
 
-def latest_vo2max(group: str, db_path: str = DB_NAME) -> dict | None:
+def latest_vo2max(group: str, db_path: str | None = None) -> dict | None:
     """Most recent VO2max reading for a sport group, or None."""
     sports = SPORT_GROUPS[group]
     marks = ", ".join("?" * len(sports))
@@ -304,7 +305,7 @@ def latest_vo2max(group: str, db_path: str = DB_NAME) -> dict | None:
     return {"value": row["vo2max"], "day": row["day"]} if row else None
 
 
-def filter_bounds(db_path: str = DB_NAME) -> dict:
+def filter_bounds(db_path: str | None = None) -> dict:
     """Largest distance (km), elevation gain (m) and moving time (h), for filter sliders."""
     with _connect(db_path) as conn:
         row = conn.execute(
@@ -326,7 +327,7 @@ WELLNESS_COLUMNS = [
 ]
 
 
-def daily_wellness(start: date, end: date, db_path: str = DB_NAME) -> list[dict]:
+def daily_wellness(start: date, end: date, db_path: str | None = None) -> list[dict]:
     """Recovery data per day (oldest first) in the inclusive range."""
     with _connect(db_path) as conn:
         try:
@@ -340,7 +341,7 @@ def daily_wellness(start: date, end: date, db_path: str = DB_NAME) -> list[dict]
     return [dict(r) for r in rows]
 
 
-def daily_intensity(start: date, end: date, db_path: str = DB_NAME) -> list[dict]:
+def daily_intensity(start: date, end: date, db_path: str | None = None) -> list[dict]:
     """Per-day training load, hard minutes (zone 4+5) and peak aerobic/anaerobic effect, all sports."""
     params = {"start": start.isoformat(), "end": end.isoformat(), "sport": None}
     with _connect(db_path) as conn:
@@ -362,7 +363,7 @@ def daily_intensity(start: date, end: date, db_path: str = DB_NAME) -> list[dict
     return [dict(r) for r in rows]
 
 
-def power_prs(today: date, days: int = 28, db_path: str = DB_NAME) -> list[dict]:
+def power_prs(today: date, days: int = 28, db_path: str | None = None) -> list[dict]:
     """Durations where the best power in the last `days` beats every earlier ride."""
     since = (today - timedelta(days=days - 1)).isoformat()
     bests = ", ".join(
@@ -383,7 +384,7 @@ def power_prs(today: date, days: int = 28, db_path: str = DB_NAME) -> list[dict]
     return out
 
 
-def estimated_ftp_trend(db_path: str = DB_NAME) -> list[dict]:
+def estimated_ftp_trend(db_path: str | None = None) -> list[dict]:
     """95% of the best 20-minute power per calendar month (a rough FTP estimate)."""
     with _connect(db_path) as conn:
         rows = conn.execute(
@@ -400,7 +401,7 @@ def estimated_ftp_trend(db_path: str = DB_NAME) -> list[dict]:
     return [{"month": r["month"], "ftp_estimate": r["best20"] * 0.95} for r in rows]
 
 
-def week_progress(today: date, db_path: str = DB_NAME) -> dict:
+def week_progress(today: date, db_path: str | None = None) -> dict:
     """This week (Mon..today) vs the average of the 4 full weeks before, plus intensity split."""
     week_start = today - timedelta(days=today.weekday())
     this = summary(week_start, today, db_path=db_path)
@@ -421,7 +422,7 @@ def week_progress(today: date, db_path: str = DB_NAME) -> dict:
     }
 
 
-def longest_activity(start: date, end: date, sports: tuple[str, ...], db_path: str = DB_NAME) -> dict | None:
+def longest_activity(start: date, end: date, sports: tuple[str, ...], db_path: str | None = None) -> dict | None:
     marks = ", ".join("?" * len(sports))
     with _connect(db_path) as conn:
         row = conn.execute(

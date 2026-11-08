@@ -1,11 +1,12 @@
-import sys
-from pathlib import Path
+import os
 
 
 def main() -> None:
-    """Launch the Streamlit dashboard."""
-    from streamlit.web import cli as stcli
+    """Serve the API (and the built web app, if present)."""
+    import uvicorn
 
-    app = Path(__file__).parent / "main.py"
-    sys.argv = ["streamlit", "run", str(app)]
-    sys.exit(stcli.main())
+    uvicorn.run(
+        "garmin_dashboards.api:app",
+        host=os.environ.get("HOST", "127.0.0.1"),
+        port=int(os.environ.get("PORT", "8000")),
+    )

@@ -138,15 +138,17 @@ def _raw_for_day(payload, day: str):
     return None
 
 
-def sync_wellness(api, full: bool = False, today: date | None = None) -> tuple[int, list[str]]:
+def sync_wellness(
+    api, full: bool = False, today: date | None = None, db_path: str | None = None
+) -> tuple[int, list[str]]:
     """Fetch recent days into the wellness table. Returns (days stored, failed endpoints)."""
     today = today or date.today()
-    last = None if full else last_wellness_day()
+    last = None if full else last_wellness_day(db_path)
     start = (
         date.fromisoformat(last) - timedelta(days=OVERLAP_DAYS)
         if last
         else today - timedelta(days=FIRST_SYNC_DAYS - 1)
     )
     rows, failed = fetch_wellness(api, start, today)
-    save_wellness(rows)
+    save_wellness(rows, db_path)
     return len(rows), failed
