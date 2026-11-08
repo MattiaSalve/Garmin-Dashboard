@@ -1,7 +1,7 @@
 """Dashboard metrics computed from the activities table. All values are metric."""
 
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 
 DB_NAME = "garmin_data.db"
 
@@ -315,3 +315,119 @@ def filter_bounds(db_path: str = DB_NAME) -> dict:
         "elevation_m": row["e"] or 0,
         "hours": (row["s"] or 0) / 3600,
     }
+
+
+# ---------------------------------------------------------------- wellness and home page
+
+WELLNESS_COLUMNS = [
+    "day", "hrv_avg", "hrv_weekly_avg", "hrv_baseline_low", "hrv_baseline_high", "hrv_status",
+    "rhr", "sleep_score", "sleep_s", "deep_s", "rem_s", "bb_charged", "bb_high", "bb_low",
+    "stress_avg", "training_readiness",
+]
+
+
+def daily_wellness(start: date, end: date, db_path: str = DB_NAME) -> list[dict]:
+    """Recovery data per day (oldest first) in the inclusive range."""
+    with _connect(db_path) as conn:
+        try:
+            rows = conn.execute(
+                f"SELECT {', '.join(WELLNESS_COLUMNS)} FROM wellness "
+                "WHERE day BETWEEN ? AND ? ORDER BY day",
+                (start.isoformat(), end.isoformat()),
+            ).fetchall()
+        except sqlite3.OperationalError:  # table not created yet
+            return []
+    return [dict(r) for r in rows]
+
+
+def daily_intensity(start: date, end: date, db_path: str = DB_NAME) -> list[dict]:
+    """Per-day training load, hard minutes (zone 4+5) and peak aerobic/anaerobic effect, all sports."""
+    params = {"start": start.isoformat(), "end": end.isoformat(), "sport": None}
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT date(start_time_local) AS day,
+                   COALESCE(SUM(training_load), 0)                                   AS load,
+                   COALESCE(SUM(COALESCE(hr_zone4_s, 0) + COALESCE(hr_zone5_s, 0)), 0) / 60.0 AS hard_min,
+                   MAX(aerobic_te)                                                   AS max_aerobic_te,
+                   MAX(anaerobic_te)                                                 AS max_anaerobic_te,
+                   COALESCE(SUM(moving_duration_s), 0) / 3600.0                      AS hours
+            FROM activities
+            {_FILTER}
+            GROUP BY day
+            ORDER BY day
+            """,
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def power_prs(today: date, days: int = 28, db_path: str = DB_NAME) -> list[dict]:
+    """Durations where the best power in the last `days` beats every earlier ride."""
+    since = (today - timedelta(days=days - 1)).isoformat()
+    bests = ", ".join(
+        f"MAX(CASE WHEN date(start_time_local) >= :since THEN json_extract(raw_json, '$.maxAvgPower_{d}') END) AS r{d}, "
+        f"MAX(CASE WHEN date(start_time_local) < :since THEN json_extract(raw_json, '$.maxAvgPower_{d}') END) AS o{d}"
+        for d in POWER_CURVE_SECONDS
+    )
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT {bests} FROM activities WHERE raw_json IS NOT NULL AND date(start_time_local) <= :today",
+            {"since": since, "today": today.isoformat()},
+        ).fetchone()
+    out = []
+    for d in POWER_CURVE_SECONDS:
+        recent, old = row[f"r{d}"], row[f"o{d}"]
+        if recent is not None and (old is None or recent > old):
+            out.append({"seconds": d, "watts": recent, "previous_watts": old})
+    return out
+
+
+def estimated_ftp_trend(db_path: str = DB_NAME) -> list[dict]:
+    """95% of the best 20-minute power per calendar month (a rough FTP estimate)."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT strftime('%Y-%m', start_time_local) AS month,
+                   MAX(json_extract(raw_json, '$.maxAvgPower_1200')) AS best20
+            FROM activities
+            WHERE raw_json IS NOT NULL
+            GROUP BY month
+            HAVING best20 IS NOT NULL
+            ORDER BY month
+            """
+        ).fetchall()
+    return [{"month": r["month"], "ftp_estimate": r["best20"] * 0.95} for r in rows]
+
+
+def week_progress(today: date, db_path: str = DB_NAME) -> dict:
+    """This week (Mon..today) vs the average of the 4 full weeks before, plus intensity split."""
+    week_start = today - timedelta(days=today.weekday())
+    this = summary(week_start, today, db_path=db_path)
+    prev = summary(week_start - timedelta(days=28), week_start - timedelta(days=1), db_path=db_path)
+    zones = weekly_hr_zones(week_start, today, db_path=db_path)
+    z = {f"Zone {i}": sum(w[f"Zone {i}"] for w in zones) for i in range(1, 6)}
+    return {
+        "week_start": week_start,
+        "hours": this["total_moving_duration_h"],
+        "distance_km": this["total_distance_km"],
+        "load": this["total_training_load"],
+        "activity_count": this["activity_count"],
+        "avg_hours": prev["total_moving_duration_h"] / 4,
+        "avg_load": prev["total_training_load"] / 4,
+        "easy_h": z["Zone 1"] + z["Zone 2"],
+        "moderate_h": z["Zone 3"],
+        "hard_h": z["Zone 4"] + z["Zone 5"],
+    }
+
+
+def longest_activity(start: date, end: date, sports: tuple[str, ...], db_path: str = DB_NAME) -> dict | None:
+    marks = ", ".join("?" * len(sports))
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT activity_name, date(start_time_local) AS day, distance_m FROM activities "
+            f"WHERE date(start_time_local) BETWEEN ? AND ? AND sport_type IN ({marks}) "
+            f"ORDER BY distance_m DESC LIMIT 1",
+            (start.isoformat(), end.isoformat(), *sports),
+        ).fetchone()
+    return dict(row) if row else None

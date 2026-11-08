@@ -63,6 +63,41 @@ BACKFILL_FROM_RAW = {
 }
 
 
+# One row per local calendar day of recovery data (HRV, resting HR, sleep, Body Battery).
+WELLNESS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS wellness (
+    day                 TEXT PRIMARY KEY,
+    hrv_avg             REAL,
+    hrv_weekly_avg      REAL,
+    hrv_baseline_low    REAL,
+    hrv_baseline_high   REAL,
+    hrv_status          TEXT,
+    rhr                 REAL,
+    sleep_score         REAL,
+    sleep_s             REAL,
+    deep_s              REAL,
+    rem_s               REAL,
+    bb_charged          REAL,
+    bb_high             REAL,
+    bb_low              REAL,
+    stress_avg          REAL,
+    training_readiness  REAL,
+    last_synced         TEXT,
+    raw_json            TEXT
+)
+"""
+
+SETTINGS_SCHEMA = "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
+
+# Defaults for user settings (stored as text, converted on read).
+SETTING_DEFAULTS: dict[str, float | None] = {
+    "ftp_w": 252.0,
+    "hrv_low": None,   # personal HRV range; None = use Garmin's baseline
+    "hrv_high": None,
+    "weekly_hours_target": None,
+    "yearly_km_goal": None,
+}
+
 
 def to_row(a: dict, user_email: str, synced_at: str | None = None) -> dict:
     return {
@@ -118,6 +153,55 @@ def init_db(db_path: str = DB_NAME) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_activities_start ON activities (start_time_local)"
         )
+        conn.execute(WELLNESS_SCHEMA)
+        conn.execute(SETTINGS_SCHEMA)
+
+
+def save_wellness(days: dict[str, dict], db_path: str = DB_NAME) -> None:
+    """Upsert wellness rows keyed by day. Only the given columns are overwritten."""
+    if not days:
+        return
+    synced_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    init_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        for day, values in days.items():
+            row = {**values, "day": day, "last_synced": synced_at}
+            cols = list(row)
+            updates = ", ".join(f"{c} = excluded.{c}" for c in cols if c != "day")
+            conn.execute(
+                f"INSERT INTO wellness ({', '.join(cols)}) VALUES ({', '.join(':' + c for c in cols)}) "
+                f"ON CONFLICT(day) DO UPDATE SET {updates}",
+                row,
+            )
+
+
+def last_wellness_day(db_path: str = DB_NAME) -> str | None:
+    init_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute("SELECT MAX(day) FROM wellness").fetchone()[0]
+
+
+def get_setting(key: str, db_path: str = DB_NAME) -> float | None:
+    init_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    if row is None or row[0] in (None, ""):
+        return SETTING_DEFAULTS.get(key)
+    return float(row[0])
+
+
+def set_setting(key: str, value: float | None, db_path: str = DB_NAME) -> None:
+    init_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, None if value is None else str(value)),
+        )
+
+
+def all_settings(db_path: str = DB_NAME) -> dict[str, float | None]:
+    return {k: get_setting(k, db_path) for k in SETTING_DEFAULTS}
 
 
 def known_activity_ids(user_email: str, db_path: str = DB_NAME) -> set[int]:

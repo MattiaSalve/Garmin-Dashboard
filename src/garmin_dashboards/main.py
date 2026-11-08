@@ -14,17 +14,16 @@ import streamlit as st
 from garminconnect.activity_details import parse_activity_detail_metrics
 
 from garmin_dashboards import auth
-from garmin_dashboards.db import DB_NAME, init_db
+from garmin_dashboards.db import DB_NAME, all_settings, init_db, set_setting
 from garmin_dashboards.fitness import fitness_series
 from garmin_dashboards.metrics import (
     SEARCH_ORDERS,
-    SPORT_GROUPS,
     by_sport,
     daily_totals,
     daily_training_load,
-    distance_by_group,
+    daily_wellness,
+    estimated_ftp_trend,
     filter_bounds,
-    latest_vo2max,
     power_curve,
     search_activities,
     summary,
@@ -32,6 +31,8 @@ from garmin_dashboards.metrics import (
     weekly_totals,
 )
 from garmin_dashboards.sync import sync
+from garmin_dashboards.ui_home import show_home
+from garmin_dashboards.wellness import sync_wellness
 
 
 DEFAULT_RANGE_DAYS = 365
@@ -55,6 +56,8 @@ CHANNEL_COLORS = {
 }
 ELEVATION_BACKGROUND_FOR = ("Heart rate", "Power", "Speed")
 TRAILING_SPEED_WINDOW = None  # None = running average from the start of the ride; or e.g. "30s"
+# Trailing windows for the power line (None = unsmoothed samples).
+POWER_SMOOTHING = {"Raw": None, "3 s": "3s", "30 s": "30s"}
 CHART_ORDER = ("Heart rate", "Power", "Speed", "Elevation", "Cadence")
 
 
@@ -262,6 +265,32 @@ def zoom_from_event(event) -> tuple[float, float] | None:
     return None
 
 
+def range_stats(frames: dict[str, pd.DataFrame], x_unit: str) -> dict[str, str]:
+    """Label -> formatted value for the plotted part of a ride.
+
+    `frames` maps channel title to a frame with `x`, `minutes` and `value` columns, already cut
+    to the range of interest. Elevation reports total gain; other channels report their mean.
+    """
+    stats: dict[str, str] = {}
+    non_empty = [f for f in frames.values() if not f.empty]
+    if non_empty:
+        ref = non_empty[0]
+        span = ref["minutes"].max() - ref["minutes"].min()
+        stats["Duration"] = f"{int(span // 60)}h {int(span % 60):02d}m" if span >= 60 else f"{span:.0f} min"
+        if x_unit == "km":
+            stats["Distance"] = f"{ref['x'].max() - ref['x'].min():.1f} km"
+    for title, df in frames.items():
+        if df.empty:
+            continue
+        unit = next(u for t, u, _, _ in RIDE_CHANNELS if t == title)
+        if title == "Elevation":
+            gain = df.sort_values("x")["value"].diff().clip(lower=0).sum()
+            stats["Elevation gain"] = f"{gain:.0f} m"
+        else:
+            stats[f"Avg {title.lower()}"] = f"{df['value'].mean():.1f} {unit}" if title == "Speed" else f"{df['value'].mean():.0f} {unit}"
+    return stats
+
+
 def show_ride_charts(activity_id: int) -> None:
     try:
         samples = load_activity_samples(st.session_state.api, activity_id)
@@ -310,60 +339,103 @@ def show_ride_charts(activity_id: int) -> None:
         st.caption("This ride has no heart rate, power, speed, elevation, or cadence data.")
         return
 
+    # Elevation is the base chart; the other channels are toggled on top of it.
+    optional = [t for t in CHART_ORDER if t in series and t != "Elevation"]
+    enabled = []
+    for col, title in zip(st.columns(max(len(optional), 1)), optional):
+        # Without elevation there is no base chart, so the first channel starts on.
+        first_on = "Elevation" not in series and title == optional[0]
+        if col.toggle(title, value=first_on, key=f"show_{activity_id}_{title}"):
+            enabled.append(title)
+    power_window = None
+    if "Power" in enabled:
+        choice = st.radio(
+            "Power smoothing", list(POWER_SMOOTHING), index=2, horizontal=True,
+            key=f"power_smooth_{activity_id}",
+        )
+        power_window = POWER_SMOOTHING[choice]
+    shown = (["Elevation"] if "Elevation" in series else []) + enabled
+
     def frame(title: str, zoomed: bool = True) -> pd.DataFrame:
         df = pd.DataFrame({"x": x_values, "minutes": minutes, "value": series[title][1]}).dropna()
         if zoomed and zoom:
             df = df[df["x"].between(*zoom)]
         return df
 
-    elevation_frame = frame("Elevation") if "Elevation" in series else None
+    if not shown:
+        st.caption("Switch on a channel above to plot it.")
+        return
     brush = alt.selection_interval(name="zoom", encodings=["x"])
-
-    charts = []
-    for title in CHART_ORDER:
-        if title not in series:
-            continue
+    layers = []
+    channel_data = {}
+    for title in shown:
         unit = series[title][0]
-        base = _area(frame(title), CHANNEL_COLORS[title], unit, x_title, zoom).add_params(brush)
-        if title == "Speed":
-            # Average from the start of the ride, then cut to the zoomed range.
-            trailing = trailing_average(frame(title, zoomed=False), TRAILING_SPEED_WINDOW)
+        data = frame(title)
+        if title == "Power" and power_window:
+            # Trailing mean over the whole ride, then cut to the zoomed range.
+            data = trailing_average(frame(title, zoomed=False), power_window)
             if zoom:
-                trailing = trailing[trailing["x"].between(*zoom)]
-            line = (
-                alt.Chart(trailing)
-                .mark_line(color=CHANNEL_COLORS[title], opacity=1, clip=True)
-                .encode(x=_x_encoding(x_title, zoom), y=alt.Y("value:Q", title=unit))
-            )
-            base = alt.layer(base, line)
+                data = data[data["x"].between(*zoom)]
+        channel_data[title] = data
+        color = CHANNEL_COLORS[title]
         if title == "Elevation":
-            chart = base
-        elif title in ELEVATION_BACKGROUND_FOR and elevation_frame is not None:
-            # Strava-style: elevation as a grey filled background on its own (right) axis.
-            background = (
-                alt.Chart(elevation_frame)
-                .mark_area(opacity=0.3, color=CHANNEL_COLORS["Elevation"], clip=True)
+            layer = (
+                alt.Chart(data)
+                .mark_area(opacity=0.3, color=color, clip=True)
+                .encode(x=_x_encoding(x_title, zoom), y=alt.Y("value:Q", title="Elevation (m)"))
+            )
+        else:
+            # Each channel gets its own hidden scale so different units can share one chart.
+            layer = (
+                alt.Chart(data)
+                .mark_line(color=color, clip=True, opacity=0.7)
                 .encode(
                     x=_x_encoding(x_title, zoom),
-                    y=alt.Y("value:Q", title="Elevation (m)", axis=alt.Axis(orient="right")),
+                    y=alt.Y("value:Q", axis=None, scale=alt.Scale(zero=False)),
                 )
             )
-            chart = alt.layer(background, base).resolve_scale(y="independent")
-        else:
-            chart = base
-        charts.append((title, chart.properties(title=f"{title} ({unit})", height=340)))
+        layers.append(layer)
 
-    picked = None
-    for title, chart in charts:
-        # The zoom is part of the key so each zoom level starts with a fresh (empty) brush.
-        event = st.altair_chart(
-            chart, width="stretch", on_select="rerun", selection_mode="zoom",
-            key=f"ride_{activity_id}_{title}_{zoom}_{by_distance}",
-        )
-        picked = picked or zoom_from_event(event)
+    # Hover: one wide table (x plus a column per shown channel) so a single tooltip lists every value.
+    wide = None
+    for title, data in channel_data.items():
+        col = data[["x", "value"]].drop_duplicates("x").rename(columns={"value": title})
+        wide = col if wide is None else wide.merge(col, on="x", how="outer")
+    wide = wide.sort_values("x")
+    hover = alt.selection_point(name="hover", on="pointerover", nearest=True, fields=["x"], empty=False, clear="pointerout")
+    tooltip = [alt.Tooltip("x:Q", title=x_title, format=".2f")] + [
+        alt.Tooltip(f"{t}:Q", title=f"{t} ({series[t][0]})", format=".2f") for t in channel_data
+    ]
+    hover_base = alt.Chart(wide).encode(x=_x_encoding(x_title, zoom))
+    layers.append(
+        hover_base.mark_point(opacity=0, clip=True).add_params(hover)
+    )
+    layers.append(
+        hover_base.mark_rule(color="#888", clip=True)
+        .encode(opacity=alt.condition(hover, alt.value(0.6), alt.value(0)), tooltip=tooltip)
+    )
+    # Switch off the default per-mark tooltips (raw, unrounded values); only the hover rule's tooltip stays.
+    chart = (
+        alt.layer(*layers).resolve_scale(y="independent").add_params(brush).configure_mark(tooltip=None)
+    )
+    # The zoom is part of the key so each zoom level starts with a fresh (empty) brush.
+    event = st.altair_chart(
+        chart.properties(height=380), width="stretch", on_select="rerun", selection_mode="zoom",
+        key=f"ride_{activity_id}_{zoom}_{by_distance}_{'-'.join(enabled)}",
+    )
+    picked = zoom_from_event(event)
     if picked:
         st.session_state[zoom_key] = picked
         st.rerun()
+
+    # Averages over the zoomed part (or the whole ride when not zoomed).
+    st.markdown(f"**Averages — {'selected part' if zoom else 'whole ride'}**")
+    stats = range_stats(
+        {t: frame(t) for t in shown}, x_unit="km" if by_distance else "min",
+    )
+    cols = st.columns(len(stats))
+    for col, (label, value) in zip(cols, stats.items()):
+        col.metric(label, value)
 
 
 def auto_sync(email: str) -> None:
@@ -374,9 +446,26 @@ def auto_sync(email: str) -> None:
     try:
         with st.spinner("Syncing new activities from Garmin..."):
             new, _ = sync(st.session_state.api, email)
-        st.toast(f"{new} new activities synced." if new else "Already up to date.")
+        st.toast(f"{new} new activities synced." if new else "Activities up to date.")
     except Exception as exc:
         st.warning(f"Automatic sync failed: {exc}")
+    run_wellness_sync(full=False, quiet=True)
+
+
+def run_wellness_sync(full: bool, quiet: bool) -> None:
+    """Download HRV, sleep, resting HR and Body Battery; never blocks the rest of the app."""
+    try:
+        with st.spinner("Syncing recovery data (HRV, sleep, resting HR)..."):
+            days, failed = sync_wellness(st.session_state.api, full=full)
+    except Exception as exc:
+        st.warning(f"Recovery data sync failed: {exc}")
+        return
+    # Training readiness isn't supported on every watch; don't nag about it.
+    failed = [f for f in failed if f != "readiness"]
+    if failed:
+        st.warning(f"Some recovery data couldn't be downloaded: {', '.join(failed)}.")
+    elif not quiet:
+        st.success(f"Recovery data for {days} days updated.")
 
 
 def sidebar(email: str) -> None:
@@ -392,6 +481,9 @@ def sidebar(email: str) -> None:
                 st.success(f"{new} new activities ({fetched} fetched).")
             except Exception as exc:
                 st.error(f"Sync failed: {exc}")
+            run_wellness_sync(full=full, quiet=False)
+
+        settings_form()
 
         st.caption("Signing out also forgets this computer's saved sign-in.")
         if st.button("Sign out"):
@@ -400,6 +492,40 @@ def sidebar(email: str) -> None:
             st.session_state.pop("email", None)
             st.session_state.pop("auto_synced", None)
             st.rerun()
+
+
+SETTING_FIELDS = [
+    # (key, label, help, step)
+    ("ftp_w", "FTP (W)", "Used to turn workout targets into watts.", 1.0),
+    ("hrv_low", "HRV range low (ms)", "Leave empty to use Garmin's baseline.", 1.0),
+    ("hrv_high", "HRV range high (ms)", "Leave empty to use Garmin's baseline.", 1.0),
+    ("weekly_hours_target", "Weekly hours target", None, 0.5),
+    ("yearly_km_goal", "Yearly cycling goal (km)", None, 100.0),
+]
+
+
+def settings_form() -> None:
+    current = all_settings()
+    with st.expander("Settings"):
+        with st.form("settings"):
+            values = {
+                key: st.number_input(label, value=current[key], min_value=0.0, step=step, help=help_text,
+                                     placeholder="Not set")
+                for key, label, help_text, step in SETTING_FIELDS
+            }
+            trend = estimated_ftp_trend()
+            if trend:
+                st.caption(f"Latest FTP estimate from your rides: {trend[-1]['ftp_estimate']:.0f} W "
+                           f"({trend[-1]['month']}).")
+            if st.form_submit_button("Save"):
+                if bool(values["hrv_low"]) != bool(values["hrv_high"]) or (
+                    values["hrv_low"] and values["hrv_low"] >= values["hrv_high"]
+                ):
+                    st.error("Set both HRV values, with low below high, or leave both empty.")
+                    return
+                for key, value in values.items():
+                    set_setting(key, value or None)
+                st.rerun()
 
 
 def show_fitness_chart(start: date, end: date) -> None:
@@ -544,7 +670,7 @@ def _delta(now: float, before: float, unit: str, digits: int = 0) -> str | None:
     return f"{diff:+,.{digits}f} {unit}".strip() if before else None
 
 
-def show_overview() -> None:
+def show_activities() -> None:
     today = date.today()
     week = (today - timedelta(days=6), today)
     prev = (today - timedelta(days=13), today - timedelta(days=7))
@@ -560,27 +686,6 @@ def show_overview() -> None:
               _delta(s["total_elevation_gain_m"], p["total_elevation_gain_m"], "m"))
     st.caption("Changes compare with the 7 days before.")
     pick_ride(search_activities(start=week[0], end=week[1]), key="overview_rides")
-
-    st.subheader("Health")
-    daily = {date.fromisoformat(r["day"]): r["load"] for r in daily_training_load()}
-    now = fitness_series(daily, end=today)[-1] if daily else None
-    h1, h2, h3, h4 = st.columns(4)
-    for col, group in zip((h1, h2), SPORT_GROUPS):
-        v = latest_vo2max(group)
-        col.metric(f"VO₂max · {group.lower()}", f"{v['value']:.0f}" if v else "–")
-    h3.metric("Fitness", f"{now['fitness']:.0f}" if now else "–")
-    h4.metric("Form", f"{now['form']:+.0f}" if now else "–", help="Fitness minus fatigue. Negative means tired.")
-
-    periods = {
-        "7 days": week,
-        "30 days": (today - timedelta(days=29), today),
-        "This year": (date(today.year, 1, 1), today),
-        "All time": (date(1970, 1, 1), today),
-    }
-    totals = {name: distance_by_group(*rng) for name, rng in periods.items()}
-    km = pd.DataFrame(totals).round(0).astype(int)
-    km.index = [f"{g} (km)" for g in km.index]
-    st.table(km)
 
 
 def show_find() -> None:
@@ -625,7 +730,7 @@ def show_find() -> None:
 
 CHARTS = [
     "Weekly distance", "Fitness and form", "Heart-rate zones", "Power curve",
-    "Calendar", "Weekly training load", "Time by sport",
+    "Calendar", "Weekly training load", "Time by sport", "HRV and resting HR",
 ]
 
 
@@ -658,6 +763,38 @@ def show_weekly_distance(start: date, end: date, sport: str | None) -> None:
         pick_ride(rows, key="week_rides")
 
 
+def show_recovery_chart(start: date, end: date) -> None:
+    """Overnight HRV with Garmin's baseline band, and resting heart rate, over any range."""
+    df = pd.DataFrame(daily_wellness(start, end))
+    if df.empty:
+        st.info("No recovery data in this range. Sync from Garmin, or use a full re-sync for older history.")
+        return
+    df["day"] = pd.to_datetime(df["day"])
+    x = alt.X("day:T", title=None)
+    band = (
+        alt.Chart(df.dropna(subset=["hrv_baseline_low"]))
+        .mark_area(color="#1e88e5", opacity=0.12)
+        .encode(x=x, y="hrv_baseline_low:Q", y2="hrv_baseline_high:Q")
+    )
+    hrv = alt.Chart(df.dropna(subset=["hrv_avg"])).encode(
+        x=x, tooltip=[alt.Tooltip("day:T", title="Date"), alt.Tooltip("hrv_avg:Q", title="HRV (ms)"),
+                      alt.Tooltip("hrv_weekly_avg:Q", title="7-day avg (ms)")],
+    )
+    hrv_chart = alt.layer(
+        band,
+        hrv.mark_point(color="#1e88e5", size=15, opacity=0.5).encode(y=alt.Y("hrv_avg:Q", title="HRV (ms)", scale=alt.Scale(zero=False))),
+        hrv.mark_line(color="#1e88e5").encode(y="hrv_weekly_avg:Q"),
+    ).properties(height=260, title="Overnight HRV · dots nightly, line 7-day average, band Garmin baseline")
+    rhr = (
+        alt.Chart(df.dropna(subset=["rhr"]))
+        .mark_line(color="#e53935")
+        .encode(x=x, y=alt.Y("rhr:Q", title="bpm", scale=alt.Scale(zero=False)),
+                tooltip=[alt.Tooltip("day:T", title="Date"), alt.Tooltip("rhr:Q", title="Resting HR")])
+        .properties(height=160, title="Resting heart rate")
+    )
+    st.altair_chart(alt.vconcat(hrv_chart, rhr).resolve_scale(x="shared"), width="stretch")
+
+
 def show_trends() -> None:
     today = date.today()
     c1, c2, c3 = st.columns([2, 2, 1])
@@ -671,6 +808,9 @@ def show_trends() -> None:
         return
     start, end = picked
     sport = None if sport_choice == "All" else sport_choice
+    if chart_name == "HRV and resting HR":
+        show_recovery_chart(start, end)
+        return
     if summary(start, end, sport)["activity_count"] == 0:
         st.info("No activities in this range. Try another date range or sport.")
         return
@@ -710,9 +850,13 @@ def main() -> None:
     sidebar(email)
 
     page = st.segmented_control(
-        "Page", ["Overview", "Find", "Trends"], default="Overview", label_visibility="collapsed"
+        "Page", ["Home", "Activities", "Find", "Trends"], default="Home", label_visibility="collapsed"
     )
-    {"Find": show_find, "Trends": show_trends}.get(page, show_overview)()
+    pages = {"Activities": show_activities, "Find": show_find, "Trends": show_trends}
+    if page in pages:
+        pages[page]()
+    else:
+        show_home(pick_ride)
 
 
 if __name__ == "__main__":

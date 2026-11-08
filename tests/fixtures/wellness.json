@@ -1,0 +1,206 @@
+{
+ "hrv": {
+  "hrvSummaries": [
+   {
+    "calendarDate": "2026-11-07",
+    "weeklyAvg": 88,
+    "lastNightAvg": 95,
+    "lastNight5MinHigh": 138,
+    "baseline": {
+     "lowUpper": 90,
+     "balancedLow": 96,
+     "balancedUpper": 124,
+     "markerValue": 0.07110596
+    },
+    "status": "LOW",
+    "feedbackPhrase": "HRV_LOW_7",
+    "createTimeStamp": "2026-11-07T06:18:45.344"
+   },
+   {
+    "calendarDate": "2026-11-08",
+    "weeklyAvg": 88,
+    "lastNightAvg": 90,
+    "lastNight5MinHigh": 120,
+    "baseline": {
+     "lowUpper": 90,
+     "balancedLow": 96,
+     "balancedUpper": 124,
+     "markerValue": 0.0730896
+    },
+    "status": "LOW",
+    "feedbackPhrase": "HRV_LOW_3",
+    "createTimeStamp": "2026-11-08T06:39:30.714"
+   }
+  ]
+ },
+ "sleep": [
+  {
+   "calendarDate": "2026-11-07",
+   "values": {
+    "remTime": 6240,
+    "restingHeartRate": 48,
+    "totalSleepTimeInSeconds": 31860,
+    "respiration": 14.25,
+    "localSleepEndTimeInMillis": 1794035807000,
+    "deepTime": 6000,
+    "awakeTime": 540,
+    "sleepScoreQuality": "EXCELLENT",
+    "spO2": null,
+    "localSleepStartTimeInMillis": 1794003407000,
+    "sleepNeed": 480,
+    "bodyBatteryChange": 58,
+    "gmtSleepStartTimeInMillis": 1793999807000,
+    "gmtSleepEndTimeInMillis": 1794032207000,
+    "hrvStatus": "LOW",
+    "skinTempF": null,
+    "sleepScore": 90,
+    "skinTempC": null,
+    "lightTime": 19620,
+    "avgOvernightHrv": 95.0,
+    "avgHeartRate": 52.0,
+    "hrv7dAverage": 88.0
+   }
+  },
+  {
+   "calendarDate": "2026-11-08",
+   "values": {
+    "remTime": 6300,
+    "restingHeartRate": 48,
+    "totalSleepTimeInSeconds": 30645,
+    "respiration": 13.99,
+    "localSleepEndTimeInMillis": 1794123554000,
+    "deepTime": 4560,
+    "awakeTime": 960,
+    "sleepScoreQuality": "GOOD",
+    "spO2": null,
+    "localSleepStartTimeInMillis": 1794091949000,
+    "sleepNeed": 480,
+    "bodyBatteryChange": 59,
+    "gmtSleepStartTimeInMillis": 1794088349000,
+    "gmtSleepEndTimeInMillis": 1794119954000,
+    "hrvStatus": "LOW",
+    "skinTempF": null,
+    "sleepScore": 84,
+    "skinTempC": null,
+    "lightTime": 19800,
+    "avgOvernightHrv": 90.0,
+    "avgHeartRate": 51.0,
+    "hrv7dAverage": 88.0
+   }
+  }
+ ],
+ "rhr": [
+  {
+   "calendarDate": "2026-11-07",
+   "value": 48.0
+  },
+  {
+   "calendarDate": "2026-11-08",
+   "value": 48.0
+  }
+ ],
+ "bb": [
+  {
+   "date": "2026-11-07",
+   "charged": 53,
+   "drained": 70,
+   "startTimestampGMT": "2026-11-06T23:00:00.0",
+   "endTimestampGMT": "2026-11-07T23:00:00.0",
+   "startTimestampLocal": "2026-11-07T00:00:00.0",
+   "endTimestampLocal": "2026-11-08T00:00:00.0",
+   "bodyBatteryValuesArray": [
+    [
+     1794006000000,
+     51
+    ],
+    [
+     1794030660000,
+     98
+    ],
+    [
+     1794034800000,
+     91
+    ],
+    [
+     1794063240000,
+     47
+    ],
+    [
+     1794063600000,
+     47
+    ],
+    [
+     1794086280000,
+     28
+    ]
+   ],
+   "bodyBatteryValueDescriptorDTOList": [
+    {
+     "bodyBatteryValueDescriptorIndex": 0,
+     "bodyBatteryValueDescriptorKey": "timestamp"
+    },
+    {
+     "bodyBatteryValueDescriptorIndex": 1,
+     "bodyBatteryValueDescriptorKey": "bodyBatteryLevel"
+    }
+   ],
+   "endOfDayBodyBatteryDynamicFeedbackEvent": {
+    "eventTimestampGmt": "2026-11-07T22:30:15.0",
+    "bodyBatteryLevel": "HIGH",
+    "feedbackShortType": "SLEEP_TIME_PASSED_NOT_STRESS_DATA_AND_INTENSIVE_EXERCISE",
+    "feedbackLongType": "SLEEP_TIME_PASSED_NOT_STRESS_DATA_AND_INTENSIVE_EXERCISE"
+   }
+  },
+  {
+   "date": "2026-11-08",
+   "charged": 53,
+   "drained": 0,
+   "startTimestampGMT": "2026-11-07T23:00:00.0",
+   "endTimestampGMT": "2026-11-08T06:39:00.0",
+   "startTimestampLocal": "2026-11-08T00:00:00.0",
+   "endTimestampLocal": "2026-11-08T07:39:00.0",
+   "bodyBatteryValuesArray": [
+    [
+     1794092400000,
+     34
+    ],
+    [
+     1794101220000,
+     59
+    ],
+    [
+     1794101580000,
+     59
+    ],
+    [
+     1794110400000,
+     78
+    ],
+    [
+     1794110760000,
+     78
+    ],
+    [
+     1794119040000,
+     87
+    ]
+   ],
+   "bodyBatteryValueDescriptorDTOList": [
+    {
+     "bodyBatteryValueDescriptorIndex": 0,
+     "bodyBatteryValueDescriptorKey": "timestamp"
+    },
+    {
+     "bodyBatteryValueDescriptorIndex": 1,
+     "bodyBatteryValueDescriptorKey": "bodyBatteryLevel"
+    }
+   ],
+   "endOfDayBodyBatteryDynamicFeedbackEvent": {
+    "eventTimestampGmt": "2026-11-08T00:35:54.0",
+    "bodyBatteryLevel": "HIGH",
+    "feedbackShortType": "SLEEP_TIME_PASSED_BALANCED_AND_INTENSIVE_EXERCISE",
+    "feedbackLongType": "SLEEP_TIME_PASSED_BALANCED_AND_INTENSIVE_EXERCISE"
+   }
+  }
+ ]
+}

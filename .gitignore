@@ -12,3 +12,6 @@ wheels/
 # Personal data
 garmin_data.db
 activities.json
+
+.agents/skills/developing-with-streamlit
+.claude/skills/developing-with-streamlit

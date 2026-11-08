@@ -46,3 +46,28 @@ def test_search_filters_and_groups(tmp_path):
     assert metrics.distance_by_group(*rng, db_path=path) == {"Cycling": 130.0, "Running": 10.0}
     assert metrics.latest_vo2max("Cycling", db_path=path) == {"value": 55, "day": "2026-01-01"}
     assert metrics.filter_bounds(db_path=path)["km"] == 100
+
+
+def test_power_prs_and_week_progress(tmp_path):
+    path = str(tmp_path / "t.db")
+    def ride(i, day, p300, z5=0):
+        return {"activityId": i, "startTimeLocal": f"{day} 08:00:00", "distance": 30000.0,
+                "movingDuration": 3600.0, "activityTrainingLoad": 100.0, "maxAvgPower_300": p300,
+                "maxAvgPower_1200": p300 - 40, "hrTimeInZone_1": 300, "hrTimeInZone_2": 3000,
+                "hrTimeInZone_3": 0, "hrTimeInZone_4": 0, "hrTimeInZone_5": z5}
+    db.save_activities([
+        ride(1, "2026-09-01", 300),
+        ride(2, "2026-10-20", 280),
+        ride(3, "2026-11-03", 320, z5=600),  # Tuesday of the current week
+    ], "me", path)
+    today = date(2026, 11, 8)
+    assert metrics.power_prs(today, db_path=path) == [
+        {"seconds": 300, "watts": 320, "previous_watts": 300},
+        {"seconds": 1200, "watts": 280, "previous_watts": 260},
+    ]
+    assert [r["month"] for r in metrics.estimated_ftp_trend(db_path=path)] == ["2026-09", "2026-10", "2026-11"]
+
+    w = metrics.week_progress(today, db_path=path)
+    assert w["week_start"] == date(2026, 11, 2) and w["activity_count"] == 1
+    assert w["avg_load"] == 25.0  # one 100-load ride in the 4 weeks before, averaged per week
+    assert round(w["hard_h"], 2) == round(600 / 3600, 2)
