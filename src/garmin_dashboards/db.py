@@ -147,6 +147,11 @@ SETTING_DEFAULTS: dict[str, float | None] = {
     "hrv_high": None,
     "weekly_hours_target": None,
     "yearly_km_goal": None,
+    "level_cycling": None,   # 1 beginner, 2 intermediate, 3 advanced; None = estimate from recent hours
+    "level_running": None,
+    "level_swimming": None,
+    "run_threshold_pace_s": None,  # seconds per km you can hold for about an hour; None = effort-only targets
+    "swim_threshold_pace_s": None,  # seconds per 100 m you could hold for ~20 min of continuous swimming
 }
 
 
@@ -248,6 +253,24 @@ def set_setting(key: str, value: float | None, db_path: str | None = None) -> No
             "INSERT INTO settings (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, None if value is None else str(value)),
+        )
+
+
+def get_text_setting(key: str, db_path: str | None = None) -> str:
+    """Free-text settings (e.g. the athlete's goals) share the settings table but skip the numeric handling."""
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return (row[0] or "") if row else ""
+
+
+def set_text_setting(key: str, value: str, db_path: str | None = None) -> None:
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value.strip()),
         )
 
 

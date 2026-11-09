@@ -63,6 +63,10 @@ def test_sync_then_read_back(client):
     detail = client.get("/api/activities/1").json()
     assert "raw_json" not in detail and "user_email" not in detail
     assert client.get("/api/home").status_code == 200
+    run = client.get("/api/home?sport=running").json()
+    assert run["sport"] == "running" and run["power_prs"] == [] and set(run["levels"]) == {"cycling", "running", "swimming"}
+    assert client.get("/api/home?sport=swimming").json()["pace_unit"] == "/100 m"
+    assert client.get("/api/home?sport=curling").status_code == 400
 
 
 def test_users_cannot_see_each_others_data(client, tmp_path):

@@ -15,10 +15,10 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, 
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from garminconnect.activity_details import parse_activity_detail_metrics
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from garmin_dashboards import auth, coach
-from garmin_dashboards.db import SETTING_DEFAULTS, all_settings, init_db, ensure_user_db, resolve, set_setting
+from garmin_dashboards.db import SETTING_DEFAULTS, all_settings, get_text_setting, set_text_setting, init_db, ensure_user_db, resolve, set_setting
 from garmin_dashboards.fitness import fitness_series
 from garmin_dashboards.metrics import (
     SEARCH_ORDERS,
@@ -32,19 +32,23 @@ from garmin_dashboards.metrics import (
     estimated_ftp_trend,
     filter_bounds,
     longest_activity,
+    avg_weekly_hours,
     power_curve,
     power_prs,
     search_activities,
+    sport_evidence,
     summary,
     week_progress,
     weekly_hr_zones,
     weekly_totals,
 )
 from garmin_dashboards.readiness import assess
+from garmin_dashboards.workouts import SPORTS, assess_level, suggest
 from garmin_dashboards.ride import samples_payload
 from garmin_dashboards.sync import sync
 from garmin_dashboards.wellness import sync_wellness
 
+GOALS_KEY = "athlete_goals"
 RAMP_WARNING = 7  # fitness points per week, see the Home page
 DEFAULT_FTP = 250
 HIDDEN_ACTIVITY_COLUMNS = {"raw_json", "user_email", "last_synced"}
@@ -189,15 +193,27 @@ def filters(session: Session = Depends(current_session)) -> dict:
                 "SELECT DISTINCT sport_type FROM activities WHERE sport_type IS NOT NULL ORDER BY sport_type"
             )
         ]
-    return {"sports": sports, "bounds": filter_bounds(session.db_path), "orders": list(SEARCH_ORDERS)}
+    return {"sports": sports, "groups": list(SPORT_GROUPS), "bounds": filter_bounds(session.db_path), "orders": list(SEARCH_ORDERS)}
 
 
 # ------------------------------------------------------------------ home and coach
 
 
-def _home_context(db: str, minutes: int) -> dict:
-    from garmin_dashboards.workouts import suggest
+def _check_sport(sport: str) -> str:
+    if sport not in SPORTS:
+        raise HTTPException(400, f"Unknown sport: {sport}. Choose one of {', '.join(SPORTS)}.")
+    return sport
 
+
+def _levels(db: str, settings: dict, today: date, aerobic_fitness: float | None) -> dict[str, dict]:
+    """Level per sport: the one the athlete set, else judged from their training in the sport and overall fitness."""
+    return {
+        key: assess_level(key, settings.get(f"level_{key}"), sport_evidence(key.title(), today, db), aerobic_fitness)
+        for key in SPORTS
+    }
+
+
+def _home_context(db: str, minutes: int, sport: str = "cycling") -> dict:
     today = date.today()
     settings = all_settings(db)
     wellness = daily_wellness(today - timedelta(days=90), today, db)
@@ -207,8 +223,12 @@ def _home_context(db: str, minutes: int) -> dict:
     # Form at the start of today (yesterday's value), so a ride done today doesn't change the verdict.
     form = series[-2]["form"] if len(series) >= 2 else None
     readiness = assess(wellness, intensity, form, settings, today)
-    suggestion = suggest(readiness, minutes, intensity, today)
+    # Peak fitness over the last 90 days, from every sport: a general aerobic base that carries over somewhat.
+    recent_fitness = [p["fitness"] for p in series if p["day"] >= today - timedelta(days=90)]
+    levels = _levels(db, settings, today, max(recent_fitness) if recent_fitness else None)
+    suggestion = suggest(readiness, minutes, intensity, today, sport, levels[sport]["level"])
     return {
+        "sport": sport, "levels": levels,
         "today": today, "settings": settings, "wellness": wellness, "intensity": intensity,
         "series": series, "form": form, "readiness": readiness, "suggestion": suggestion,
         "ftp": settings.get("ftp_w") or DEFAULT_FTP,
@@ -216,41 +236,55 @@ def _home_context(db: str, minutes: int) -> dict:
 
 
 @router.get("/home")
-def home(minutes: int = Query(60, ge=20, le=300), session: Session = Depends(current_session)) -> dict:
+def home(
+    minutes: int = Query(60, ge=20, le=300), sport: str = "cycling", session: Session = Depends(current_session),
+) -> dict:
     db = session.db_path
-    c = _home_context(db, minutes)
+    sport = _check_sport(sport)
+    group = sport.title()  # "cycling" -> the "Cycling" entry in SPORT_GROUPS
+    c = _home_context(db, minutes, sport)
     today, settings, series = c["today"], c["settings"], c["series"]
     suggestion, ftp = c["suggestion"], c["ftp"]
+    profile = SPORTS[sport]
+    pace = settings.get(profile.pace_setting) if profile.pace_setting else None
 
-    week = week_progress(today, db)
+    week = week_progress(today, db, group)
     year_start = date(today.year, 1, 1)
-    longest = longest_activity(year_start, today, SPORT_GROUPS["Cycling"], db)
+    longest = longest_activity(year_start, today, SPORT_GROUPS[group], db)
     ramp = series[-1]["fitness"] - series[-8]["fitness"] if len(series) > 7 else None
-    ftp_trend = estimated_ftp_trend(db)
+    ftp_trend = estimated_ftp_trend(db) if sport == "cycling" else []
     return {
+        "sport": sport,
+        "levels": c["levels"],
         "today": today,
         "has_wellness": bool(c["wellness"]),
         "readiness": asdict(c["readiness"]),
         "today_row": next((r for r in c["wellness"] if r["day"] == today.isoformat()), None),
         "form": c["form"],
         "ftp": ftp,
+        "threshold_pace_s": pace,
+        "pace_unit": profile.pace_unit,
         "settings": settings,
         "workout": {
             "key": suggestion.workout.key, "name": suggestion.workout.name,
             "purpose": suggestion.workout.purpose, "note": suggestion.workout.note,
             "minutes": suggestion.minutes, "rationale": suggestion.rationale,
-            "steps": suggestion.in_watts(ftp),
+            "steps": suggestion.in_targets(ftp, pace),
         },
         "wellness": c["wellness"],
         "intensity": daily_intensity(today - timedelta(days=89), today, db),
         "week": week,
-        "week_activities": search_activities(start=week["week_start"], end=today, db_path=db),
+        "week_hours_all": summary(week["week_start"], today, db_path=db)["total_moving_duration_h"],
+        "week_activities": [
+            a for a in search_activities(start=week["week_start"], end=today, db_path=db)
+            if a["sport_type"] in SPORT_GROUPS[group]
+        ],
         "ramp": ramp,
         "ramp_warning": RAMP_WARNING,
-        "power_prs": power_prs(today, db_path=db),
+        "power_prs": power_prs(today, db_path=db) if sport == "cycling" else [],
         "year": {
             "year": today.year,
-            "km": distance_by_group(year_start, today, db)["Cycling"],
+            "km": distance_by_group(year_start, today, db)[group],
             "goal": settings.get("yearly_km_goal"),
             "days_elapsed": (today - year_start).days,
             "days_in_year": (date(today.year, 12, 31) - year_start).days + 1,
@@ -262,8 +296,26 @@ def home(minutes: int = Query(60, ge=20, le=300), session: Session = Depends(cur
 
 class CoachBody(BaseModel):
     minutes: int = 60
+    sport: str = "cycling"
     model: str | None = None
     api_key: str | None = None
+    # Turns after the opening summary (the server rebuilds that fresh), ending with the athlete's message.
+    history: list[coach.ChatMessage] = Field(default_factory=list, max_length=20)
+
+
+class GoalsBody(BaseModel):
+    goals: str = Field(max_length=coach.GOALS_MAX)
+
+
+@router.get("/coach/goals")
+def get_goals(session: Session = Depends(current_session)) -> dict:
+    return {"goals": get_text_setting(GOALS_KEY, session.db_path)}
+
+
+@router.put("/coach/goals")
+def put_goals(body: GoalsBody, session: Session = Depends(current_session)) -> dict:
+    set_text_setting(GOALS_KEY, body.goals, session.db_path)
+    return {"goals": get_text_setting(GOALS_KEY, session.db_path)}
 
 
 @router.get("/coach/models")
@@ -273,10 +325,18 @@ def coach_models() -> dict:
 
 @router.post("/coach")
 def ask_coach(body: CoachBody, session: Session = Depends(current_session)) -> dict:
-    c = _home_context(session.db_path, body.minutes)
-    payload = coach.build_payload(c["readiness"], c["suggestion"], c["wellness"], c["intensity"], c["form"], c["ftp"])
+    c = _home_context(session.db_path, body.minutes, _check_sport(body.sport))
+    s = c["settings"]
+    payload = coach.build_payload(
+        c["readiness"], c["suggestion"], c["wellness"], c["intensity"], c["form"], c["ftp"],
+        goals=get_text_setting(GOALS_KEY, session.db_path),
+        targets={"weekly_hours": s.get("weekly_hours_target"), "yearly_km": s.get("yearly_km_goal")},
+        sport=body.sport, levels={k: v["level"] for k, v in c["levels"].items()},
+        threshold_pace_s=s.get(SPORTS[body.sport].pace_setting) if SPORTS[body.sport].pace_setting else None,
+        pace_unit=SPORTS[body.sport].pace_unit,
+    )
     try:
-        return coach.ask_coach(payload, model=body.model, api_key=body.api_key).model_dump()
+        return coach.ask_coach(payload, model=body.model, api_key=body.api_key, history=body.history).model_dump()
     except coach.CoachError as exc:
         raise HTTPException(400, str(exc)) from exc
 

@@ -2,12 +2,19 @@ import { useEffect, useState } from "react";
 import { api, useFetch } from "../api";
 import { Banner, Loading } from "../components";
 
-const FIELDS: { key: string; label: string; help?: string; step: number }[] = [
+const LEVEL_OPTIONS = [["", "Estimate from my training and fitness"], ["1", "Beginner"], ["2", "Intermediate"], ["3", "Advanced"]];
+
+const FIELDS: { key: string; label: string; help?: string; step: number; levels?: boolean }[] = [
   { key: "ftp_w", label: "FTP (W)", help: "Used to turn workout targets into watts.", step: 1 },
   { key: "hrv_low", label: "HRV range low (ms)", help: "Leave empty to use Garmin's baseline.", step: 1 },
   { key: "hrv_high", label: "HRV range high (ms)", help: "Leave empty to use Garmin's baseline.", step: 1 },
   { key: "weekly_hours_target", label: "Weekly hours target", step: 0.5 },
   { key: "yearly_km_goal", label: "Yearly cycling goal (km)", step: 100 },
+  { key: "level_cycling", label: "Cycling level", help: "Sets how hard and long suggested rides are.", step: 1, levels: true },
+  { key: "level_running", label: "Running level", help: "Beginners get run/walk and fewer intervals.", step: 1, levels: true },
+  { key: "level_swimming", label: "Swimming level", help: "Beginners get technique-focused sessions.", step: 1, levels: true },
+  { key: "run_threshold_pace_s", label: "Running threshold pace (sec/km)", help: "Pace you could hold for about an hour, e.g. 300 = 5:00/km. Turns running steps into target paces.", step: 5 },
+  { key: "swim_threshold_pace_s", label: "Swimming threshold pace (sec/100 m)", help: "Pace you could hold for about 20 minutes of continuous swimming, e.g. 110 = 1:50/100 m.", step: 1 },
 ];
 
 export function SettingsCard() {
@@ -40,8 +47,14 @@ export function SettingsCard() {
             {FIELDS.map((f) => (
               <label className="field" key={f.key} title={f.help}>
                 {f.label}
-                <input type="number" min={0} step={f.step} placeholder="Not set" value={values[f.key] ?? ""}
-                  onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} />
+                {f.levels ? (
+                  <select value={values[f.key] ?? ""} onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}>
+                    {LEVEL_OPTIONS.map(([v, text]) => <option key={v} value={v}>{text}</option>)}
+                  </select>
+                ) : (
+                  <input type="number" min={0} step={f.step} placeholder="Not set" value={values[f.key] ?? ""}
+                    onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} />
+                )}
                 {f.help ? <span className="muted">{f.help}</span> : null}
               </label>
             ))}

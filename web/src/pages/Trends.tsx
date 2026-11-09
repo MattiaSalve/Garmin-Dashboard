@@ -19,7 +19,7 @@ export function Trends() {
   const [start, setStart] = useState(daysAgo(365));
   const [end, setEnd] = useState(daysAgo(0));
   const [sport, setSport] = useState("");
-  const filters = useFetch<{ sports: string[] }>("/filters");
+  const filters = useFetch<{ sports: string[]; groups: string[] }>("/filters");
   const range: Range = { start, end, sport: sport || null };
 
   return (
@@ -31,6 +31,7 @@ export function Trends() {
         <label className="field">Sport
           <select value={sport} onChange={(e) => setSport(e.target.value)}>
             <option value="">All</option>
+            {filters.data?.groups.map((g) => <option key={g} value={g}>All {g.toLowerCase()}</option>)}
             {filters.data?.sports.map((s) => <option key={s} value={s}>{displaySport(s)}</option>)}
           </select>
         </label>

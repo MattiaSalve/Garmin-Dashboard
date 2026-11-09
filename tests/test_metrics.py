@@ -43,7 +43,7 @@ def test_search_filters_and_groups(tmp_path):
     assert ids(text="alp") == [1]
     assert ids(order="Longest distance") == [1, 2, 3]
     rng = (date(2026, 1, 1), date(2026, 1, 31))
-    assert metrics.distance_by_group(*rng, db_path=path) == {"Cycling": 130.0, "Running": 10.0}
+    assert metrics.distance_by_group(*rng, db_path=path) == {"Cycling": 130.0, "Running": 10.0, "Swimming": 0.0}
     assert metrics.latest_vo2max("Cycling", db_path=path) == {"value": 55, "day": "2026-01-01"}
     assert metrics.filter_bounds(db_path=path)["km"] == 100
 
@@ -71,3 +71,28 @@ def test_power_prs_and_week_progress(tmp_path):
     assert w["week_start"] == date(2026, 11, 2) and w["activity_count"] == 1
     assert w["avg_load"] == 25.0  # one 100-load ride in the 4 weeks before, averaged per week
     assert round(w["hard_h"], 2) == round(600 / 3600, 2)
+
+
+def test_sport_group_filter(tmp_path):
+    path = str(tmp_path / "t.db")
+    def act(i, sport, km):
+        return {"activityId": i, "activityType": {"typeKey": sport}, "startTimeLocal": "2026-01-05 08:00:00",
+                "distance": km * 1000, "movingDuration": 3600.0}
+    db.save_activities([act(1, "road_biking", 40), act(2, "trail_running", 10), act(3, "running", 5),
+                        act(4, "swimming", 2)], "me", path)
+    rng = (date(2026, 1, 1), date(2026, 1, 31))
+    assert metrics.summary(*rng, db_path=path)["total_distance_km"] == 57
+    assert metrics.summary(*rng, sport="Running", db_path=path)["total_distance_km"] == 15
+    assert metrics.summary(*rng, sport="Cycling", db_path=path)["total_distance_km"] == 40
+    assert metrics.summary(*rng, sport="swimming", db_path=path)["total_distance_km"] == 2
+    assert metrics.avg_weekly_hours("Running", date(2026, 1, 31), weeks=4, db_path=path) == 0.5
+
+
+def test_sport_evidence(tmp_path):
+    path = str(tmp_path / "t.db")
+    def run(i, day, minutes):
+        return {"activityId": i, "activityType": {"typeKey": "running"}, "startTimeLocal": f"{day} 08:00:00",
+                "distance": 8000, "movingDuration": minutes * 60}
+    db.save_activities([run(1, "2026-01-10", 47), run(2, "2025-12-20", 72), run(3, "2025-01-01", 150)], "me", path)
+    e = metrics.sport_evidence("Running", date(2026, 1, 31), db_path=path)
+    assert e["sessions_180d"] == 2 and e["longest_min_180d"] == 72 and round(e["weekly_hours"], 2) == 0.17

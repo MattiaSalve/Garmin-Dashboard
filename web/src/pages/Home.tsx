@@ -6,10 +6,20 @@ import { ActivityRow, ActivityTable, Banner, ChartTooltip, Loading, Metric, Pill
 import { query, useFetch } from "../api";
 import { ZONE_COLORS, daysAgo, fmt, fmtDuration } from "../lib";
 import { Coach } from "./Coach";
-import { WorkoutChart, WorkoutStep } from "./WorkoutChart";
+import { WorkoutChart, WorkoutStep, stepTarget } from "./WorkoutChart";
 
 const HRV = "#1e88e5", RHR = "#e53935", SLEEP = "#8e24aa", LOAD = "#bdbdbd";
-const TIME_OPTIONS = [30, 45, 60, 75, 90, 120, 150, 180];
+const TIME_OPTIONS: Record<Sport, number[]> = {
+  cycling: [30, 45, 60, 75, 90, 120, 150, 180],
+  running: [20, 30, 40, 45, 60, 75, 90, 120],
+  swimming: [20, 30, 40, 45, 60, 75, 90],
+};
+type Sport = "cycling" | "running" | "swimming";
+const SPORTS: Sport[] = ["cycling", "running", "swimming"];
+const SPORT_LABEL: Record<Sport, string> = { cycling: "Cycling", running: "Running", swimming: "Swimming" };
+const LONGEST: Record<Sport, string> = { cycling: "ride", running: "run", swimming: "swim" };
+const SPORT_KEY = "workout_sport";
+interface Level { level: string; source: "set" | "estimated"; reasons: string[] }
 
 interface Wellness {
   day: string; hrv_avg: number | null; hrv_baseline_low: number | null; hrv_baseline_high: number | null;
@@ -17,7 +27,8 @@ interface Wellness {
 }
 interface Signal { name: string; status: string; value: string; explanation: string }
 interface HomeData {
-  today: string; has_wellness: boolean;
+  week_hours_all: number;
+  today: string; has_wellness: boolean; sport: Sport; levels: Record<Sport, Level>; threshold_pace_s: number | null; pace_unit: string;
   readiness: { level: "green" | "amber" | "red"; score: number; headline: string; signals: Signal[]; hrv_range: [number, number] | null };
   today_row: Wellness | null; form: number | null; ftp: number;
   workout: { name: string; purpose: string; note: string; minutes: number; rationale: string[]; steps: WorkoutStep[] };
@@ -34,11 +45,24 @@ const signed = (v: number, digits = 0) => `${v >= 0 ? "+" : ""}${v.toFixed(digit
 
 export function Home() {
   const [minutes, setMinutes] = useState(60);
-  const { data, error, loading } = useFetch<HomeData>(`/home${query({ minutes })}`);
+  const [sport, setSportState] = useState<Sport>(() => {
+    const saved = localStorage.getItem(SPORT_KEY) as Sport | null;
+    return saved && SPORTS.includes(saved) ? saved : "cycling";
+  });
+  const { data, error, loading } = useFetch<HomeData>(`/home${query({ minutes, sport })}`);
+
+  function setSport(next: Sport) {
+    localStorage.setItem(SPORT_KEY, next);
+    setSportState(next);
+    // Keep the chosen time if the new sport offers it, otherwise the closest option.
+    const options = TIME_OPTIONS[next];
+    setMinutes(options.reduce((best, o) => (Math.abs(o - minutes) < Math.abs(best - minutes) ? o : best)));
+  }
+
   if (!data) return <Loading error={error} loading={loading} />;
   return (
     <>
-      <Today d={data} minutes={minutes} setMinutes={setMinutes} />
+      <Today d={data} minutes={minutes} setMinutes={setMinutes} sport={sport} setSport={setSport} />
       <Recovery d={data} />
       <Week d={data} />
       <Records d={data} />
@@ -46,7 +70,11 @@ export function Home() {
   );
 }
 
-function Today({ d, minutes, setMinutes }: { d: HomeData; minutes: number; setMinutes: (m: number) => void }) {
+function Today({ d, minutes, setMinutes, sport, setSport }: {
+  d: HomeData; minutes: number; setMinutes: (m: number) => void; sport: Sport; setSport: (s: Sport) => void;
+}) {
+  const options = TIME_OPTIONS[sport];
+  const level = d.levels[sport];
   const r = d.readiness;
   const t = d.today_row;
   const date = new Date(d.today + "T12:00:00").toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
@@ -72,25 +100,41 @@ function Today({ d, minutes, setMinutes }: { d: HomeData; minutes: number; setMi
         <p className="muted">Each caution costs 15 points and each bad signal 35. 75+ is green, 45–74 amber, below 45 red. Set your own HRV range in Settings.</p>
       </details>
 
-      <h3>Suggested workout · {d.workout.name}</h3>
-      <label className="field" style={{ maxWidth: 280 }}>Time available: {minutes} min
-        <input type="range" min={0} max={TIME_OPTIONS.length - 1} value={TIME_OPTIONS.indexOf(minutes)}
-          onChange={(e) => setMinutes(TIME_OPTIONS[Number(e.target.value)])} />
-      </label>
-      <p className="muted">{d.workout.purpose} · {d.workout.minutes} min</p>
-      <ul>{d.workout.rationale.map((x) => <li key={x}>{x}</li>)}</ul>
-      <WorkoutChart steps={d.workout.steps} ftp={d.ftp} />
+      <h3>{d.workout.steps.length ? "Suggested workout" : "Suggestion"} · {d.workout.name}</h3>
+      <div className="row">
+        <label className="field">Sport today
+          <select value={sport} onChange={(e) => setSport(e.target.value as Sport)}>
+            {SPORTS.map((x) => <option key={x} value={x}>{SPORT_LABEL[x]}</option>)}
+          </select>
+        </label>
+      </div>
       <details>
+        <summary>Level: {level.level} {sport} ({level.source === "set" ? "set in Settings" : "estimated"})</summary>
+        <ul>{level.reasons.map((x) => <li key={x}>{x}</li>)}</ul>
+        <p className="muted">
+          Readiness and form use all your sports. The level picks how hard and long the {sport} session is. Change it in Settings if it is wrong.
+        </p>
+      </details>
+      <label className="field" style={{ maxWidth: 280 }}>Time available: {minutes} min
+        <input type="range" min={0} max={options.length - 1} value={Math.max(options.indexOf(minutes), 0)}
+          onChange={(e) => setMinutes(options[Number(e.target.value)])} />
+      </label>
+      <p className="muted">{d.workout.purpose}{d.workout.steps.length ? ` · ${d.workout.minutes} min` : ""}</p>
+      <ul>{d.workout.rationale.map((x) => <li key={x}>{x}</li>)}</ul>
+      {d.workout.steps.length ? <WorkoutChart steps={d.workout.steps} ftp={d.ftp} sport={sport} /> : null}
+      {sport !== "cycling" && !d.threshold_pace_s && d.workout.steps.length
+        ? <p className="muted">Add your threshold pace in Settings to see target paces; until then steps show effort on a 1–10 scale.</p> : null}
+      {d.workout.steps.length ? <details>
         <summary>Steps</summary>
         <table>
-          <thead><tr><th>Step</th><th className="num">Min</th><th className="num">Watts</th><th className="num">% FTP</th></tr></thead>
+          <thead><tr><th>Step</th><th className="num">Min</th><th className="num">Target</th><th className="num">{sport === "cycling" ? "% FTP" : "% threshold"}</th></tr></thead>
           <tbody>{d.workout.steps.map((s, i) => (
-            <tr key={i}><td>{s.label}</td><td className="num">{Math.round(s.minutes)}</td><td className="num">{s.watts_low}–{s.watts_high}</td><td className="num">{s.pct_ftp}</td></tr>
+            <tr key={i}><td>{s.label}</td><td className="num">{Math.round(s.minutes)}</td><td className="num">{stepTarget(s)}</td><td className="num">{s.pct_ftp}</td></tr>
           ))}</tbody>
         </table>
-      </details>
+      </details> : null}
       {d.workout.note ? <p className="muted">Note: {d.workout.note}</p> : null}
-      <Coach minutes={minutes} ftp={d.ftp} />
+      <Coach minutes={minutes} ftp={d.ftp} sport={sport} thresholdPace={d.threshold_pace_s} paceUnit={d.pace_unit} />
     </section>
   );
 }
@@ -176,14 +220,14 @@ function Week({ d }: { d: HomeData }) {
   const start = new Date(w.week_start + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
   return (
     <section className="card">
-      <h2>This week · since {start}</h2>
+      <h2>This week · {d.sport} since {start}</h2>
       <div className="grid">
         <Metric label="Hours" value={w.hours.toFixed(1)} sub={`${signed(w.hours - w.avg_hours, 1)} vs 4-wk avg`} />
         <Metric label="Distance" value={`${fmt(w.distance_km)} km`} />
         <Metric label="Load" value={fmt(w.load)} sub={`${signed(w.load - w.avg_load)} vs 4-wk avg`} />
         <Metric label="Activities" value={w.activity_count} />
       </div>
-      {target ? <p><progress max={1} value={Math.min(w.hours / target, 1)} /><span className="muted">{w.hours.toFixed(1)} of {target.toFixed(0)} h weekly target</span></p> : null}
+      {target ? <p><progress max={1} value={Math.min(d.week_hours_all / target, 1)} /><span className="muted">{d.week_hours_all.toFixed(1)} of {target.toFixed(0)} h weekly target (all sports)</span></p> : null}
       {total > 0 ? (
         <>
           <div style={{ display: "flex", height: 22, borderRadius: 6, overflow: "hidden", marginTop: 8 }}>
@@ -194,8 +238,8 @@ function Week({ d }: { d: HomeData }) {
       ) : null}
       {d.ramp !== null ? (
         d.ramp > d.ramp_warning
-          ? <p><Banner kind="amber">Fitness rose {d.ramp.toFixed(1)} points in 7 days. Ramping this fast raises injury and illness risk.</Banner></p>
-          : <p className="muted">Ramp rate: fitness {signed(d.ramp, 1)} in the last 7 days (keep it under {d.ramp_warning}).</p>
+          ? <p><Banner kind="amber">Fitness (all sports) rose {d.ramp.toFixed(1)} points in 7 days. Ramping this fast raises injury and illness risk.</Banner></p>
+          : <p className="muted">Ramp rate: fitness (all sports) {signed(d.ramp, 1)} in the last 7 days (keep it under {d.ramp_warning}).</p>
       ) : null}
       <ActivityTable rows={d.week_activities} />
     </section>
@@ -208,7 +252,7 @@ function Records({ d }: { d: HomeData }) {
   return (
     <section className="card">
       <h2>Records and milestones</h2>
-      {d.power_prs.length ? (
+      {d.sport !== "cycling" ? null : d.power_prs.length ? (
         <>
           <b>New power bests in the last 4 weeks</b>
           <div className="grid">
@@ -220,10 +264,10 @@ function Records({ d }: { d: HomeData }) {
       ) : <p className="muted">No new power bests in the last 4 weeks.</p>}
       <div className="grid" style={{ marginTop: 12 }}>
         <div>
-          <Metric label={`Cycling ${y.year}`} value={`${fmt(y.km)} km`} sub={expected !== null ? `${signed(y.km - expected)} km vs pace` : "Set a yearly goal in Settings."} />
-          {y.goal ? <><progress max={1} value={Math.min(y.km / y.goal, 1)} /><span className="muted">{((y.km / y.goal) * 100).toFixed(0)}% of {fmt(y.goal)} km</span></> : null}
+          <Metric label={`${SPORT_LABEL[d.sport]} ${y.year}`} value={`${fmt(y.km)} km`} sub={expected !== null && d.sport === "cycling" ? `${signed(y.km - expected)} km vs pace` : d.sport === "cycling" ? "Set a yearly goal in Settings." : null} />
+          {y.goal && d.sport === "cycling" ? <><progress max={1} value={Math.min(y.km / y.goal, 1)} /><span className="muted">{((y.km / y.goal) * 100).toFixed(0)}% of {fmt(y.goal)} km</span></> : null}
         </div>
-        {y.longest?.distance_m ? <Metric label="Longest ride this year" value={`${fmt(y.longest.distance_m / 1000)} km`} sub={`${y.longest.activity_name} · ${y.longest.day}`} /> : null}
+        {y.longest?.distance_m ? <Metric label={`Longest ${LONGEST[d.sport]} this year`} value={`${fmt(y.longest.distance_m / 1000)} km`} sub={`${y.longest.activity_name} · ${y.longest.day}`} /> : null}
       </div>
       {d.ftp_trend.length >= 2 ? (
         <>

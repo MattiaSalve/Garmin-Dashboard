@@ -62,3 +62,27 @@ def test_env_key_is_only_used_in_local_mode(monkeypatch):
     assert coach.resolve_key("mine") == "mine"
     monkeypatch.setenv("GARMIN_DASHBOARDS_LOCAL", "1")
     assert coach.resolve_key() == "server-key" and coach.resolve_key("mine") == "mine"
+
+
+def test_follow_up_keeps_context(monkeypatch):
+    seen = {}
+
+    def post(body, key):
+        seen["messages"] = body["messages"]
+        return reply(json.dumps({"summary": "Shorter.", "agree_with_suggestion": False,
+                                 "adjusted_steps": None, "cautions": []}))
+
+    history = [coach.ChatMessage(role="assistant", content='{"summary": "Easy day."}'),
+               coach.ChatMessage(role="user", content="Make it 45 minutes")]
+    coach.ask_coach(payload(), post=post, api_key="k", history=history)
+    roles = [m["role"] for m in seen["messages"]]
+    assert roles == ["system", "user", "assistant", "user"]
+    assert seen["messages"][-1]["content"] == "Make it 45 minutes"
+
+
+def test_goals_and_targets_reach_the_payload():
+    r = Readiness("amber", 70, [], "h", (96, 124), True)
+    p = coach.build_payload(r, suggest(r, 60, INTENSITY, date(2026, 11, 8)), WELLNESS, INTENSITY, -5.0, 252,
+                            goals="Ride 200 km in June", targets={"weekly_hours": 6, "yearly_km": None})
+    assert p["athlete_goals"] == "Ride 200 km in June" and p["targets"] == {"weekly_hours": 6}
+    assert payload()["athlete_goals"] is None
