@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Area, CartesianGrid, ComposedChart, Line, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { ChartTooltip, Metric, Pills } from "../components";
 import { CHANNEL_COLORS, CHANNEL_ORDER, Channels, rangeStats, sampleIndices, trailingAverage } from "../lib";
@@ -7,11 +7,15 @@ export interface Samples {
   minutes: (number | null)[];
   km: (number | null)[] | null;
   channels: Channels;
+  route: [number, number, number][] | null; // [lat, lon, sample index]
 }
 
 const SMOOTHING: Record<string, number | null> = { Raw: 0, "3 s": 3, "30 s": 30 };
 
-export function RideChart({ samples }: { samples: Samples }) {
+/** What the chart is pointing at, as sample indices: the dragged or zoomed part, and the hovered sample. */
+export interface Highlight { range: [number, number] | null; hover: number | null }
+
+export function RideChart({ samples, onHighlight }: { samples: Samples; onHighlight?: (h: Highlight) => void }) {
   const titles = CHANNEL_ORDER.filter((t) => t in samples.channels);
   const optional = titles.filter((t) => t !== "Elevation");
   const hasElevation = titles.includes("Elevation");
@@ -43,9 +47,18 @@ export function RideChart({ samples }: { samples: Samples }) {
     return [a, Math.max(a, b)];
   }, [zoom, xs]);
 
+  const [hover, setHover] = useState<number | null>(null);
+  // First sample at or after an x position (km or minutes).
+  const indexAt = (x: number) => Math.max(0, xs.findIndex((v) => v !== null && v >= x));
+  const dragRange: [number, number] | null = drag ? [indexAt(Math.min(drag.from, drag.to)), indexAt(Math.max(drag.from, drag.to))] : null;
+  const rangeKey = dragRange ? dragRange.join() : zoom ? `${from},${to}` : "";
+  useEffect(() => {
+    onHighlight?.({ range: rangeKey ? (rangeKey.split(",").map(Number) as [number, number]) : null, hover });
+  }, [rangeKey, hover]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const data = useMemo(
     () => sampleIndices(from, to).filter((i) => xs[i] !== null).map((i) => {
-      const row: Record<string, number | null> = { x: xs[i] };
+      const row: Record<string, number | null> = { x: xs[i], i };
       for (const t of shown) row[t] = values[t][i];
       return row;
     }),
@@ -81,12 +94,17 @@ export function RideChart({ samples }: { samples: Samples }) {
             <ComposedChart
               data={data}
               onMouseDown={(e) => { const x = label(e); if (x !== null) setDrag({ from: x, to: x }); }}
-              onMouseMove={(e) => { const x = label(e); if (drag && x !== null) setDrag({ ...drag, to: x }); }}
+              onMouseMove={(e) => {
+                const x = label(e);
+                if (drag && x !== null) setDrag({ ...drag, to: x });
+                const row = data[Number(e.activeTooltipIndex)];
+                setHover(row && typeof row.i === "number" ? row.i : null);
+              }}
               onMouseUp={() => {
                 if (drag && Math.abs(drag.to - drag.from) > 0) setZoom([Math.min(drag.from, drag.to), Math.max(drag.from, drag.to)]);
                 setDrag(null);
               }}
-              onMouseLeave={() => setDrag(null)}
+              onMouseLeave={() => { setDrag(null); setHover(null); }}
             >
               <CartesianGrid strokeOpacity={0.2} />
               <XAxis type="number" dataKey="x" domain={["dataMin", "dataMax"]} tickFormatter={(v: number) => v.toFixed(axis === "Distance" ? 0 : 0)} label={{ value: xTitle, position: "insideBottom", offset: -4 }} height={44} />

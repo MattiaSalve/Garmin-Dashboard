@@ -1,8 +1,10 @@
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useFetch } from "../api";
 import { Banner, Loading, Metric } from "../components";
 import { displaySport, fmt, fmtHM } from "../lib";
-import { RideChart, Samples } from "./RideChart";
+import { Highlight, RideChart, Samples } from "./RideChart";
+import { RouteMap } from "./RouteMap";
 
 type Row = Record<string, number | string | null>;
 
@@ -10,6 +12,7 @@ export function Ride() {
   const { id } = useParams();
   const details = useFetch<Row>(`/activities/${id}`);
   const samples = useFetch<Samples>(`/activities/${id}/samples`);
+  const [highlight, setHighlight] = useState<Highlight>({ range: null, hover: null });
   const r = details.data;
   if (!r) return <Loading error={details.error} loading={details.loading} />;
 
@@ -42,10 +45,16 @@ export function Ride() {
         <summary>More stats</summary>
         <table><tbody>{more.map(([k, v]) => <tr key={k}><td>{k}</td><td className="num">{v}</td></tr>)}</tbody></table>
       </details>
+      {samples.data?.route ? (
+        <>
+          <h3>Route</h3>
+          <RouteMap route={samples.data.route} highlight={highlight} />
+        </>
+      ) : null}
       <h3>Ride charts</h3>
       {samples.loading ? <p className="muted">Loading second-by-second data…</p> : null}
       {samples.error ? <Banner kind="info">{samples.error}</Banner> : null}
-      {samples.data ? <RideChart key={String(id)} samples={samples.data} /> : null}
+      {samples.data ? <RideChart key={String(id)} samples={samples.data} onHighlight={setHighlight} /> : null}
     </section>
   );
 }

@@ -58,6 +58,7 @@ The data flows in four stages: Garmin API → sync modules → SQLite (`data/<ha
 
 - Keep logic in pure, testable modules. API and UI code only read from them.
 - Never send the user's email, names, locations, GPS or `raw_json` to external services (the coach payload included).
+- The route map (`RouteMap.tsx`) draws the GPS path locally. Street-map tiles from openstreetmap.org load only when the user ticks the box, because tile requests reveal the area.
 - The coach only runs when the user has entered an OpenRouter key (or, in local mode, `OPENROUTER_API_KEY` is set); see `coach.is_available()`.
 
 ## Status and next steps

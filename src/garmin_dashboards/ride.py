@@ -32,6 +32,30 @@ def _clean(values: pd.Series, digits: int) -> list[float | None]:
     return [None if pd.isna(v) else round(float(v), digits) for v in values]
 
 
+MAX_ROUTE_POINTS = 600
+
+
+def route_points(samples: pd.DataFrame, max_points: int = MAX_ROUTE_POINTS) -> list[list[float]] | None:
+    """[lat, lon, sample_index] triples for drawing the path, thinned evenly to at most `max_points`.
+
+    The sample index is the row in the chart's arrays, so a selected part of the chart can be
+    highlighted on the map.
+
+    None for indoor or GPS-less activities. Garmin reports degrees; (0, 0) means "no fix" and is dropped.
+    """
+    if "directLatitude" not in samples or "directLongitude" not in samples:
+        return None
+    pts = samples[["directLatitude", "directLongitude"]].reset_index(drop=True).dropna()
+    pts = pts[(pts["directLatitude"].abs() <= 90) & (pts["directLongitude"].abs() <= 180)]
+    pts = pts[(pts["directLatitude"] != 0) | (pts["directLongitude"] != 0)]
+    if len(pts) < 2:
+        return None
+    if len(pts) > max_points:
+        keep = [round(i * (len(pts) - 1) / (max_points - 1)) for i in range(max_points)]
+        pts = pts.iloc[keep]
+    return [[round(float(la), 6), round(float(lo), 6), int(i)] for i, (la, lo) in zip(pts.index, pts.to_numpy())]
+
+
 def samples_payload(samples: pd.DataFrame) -> dict | None:
     """Aligned arrays for the chart: time, distance (if any) and one list per available channel.
 
@@ -53,4 +77,5 @@ def samples_payload(samples: pd.DataFrame) -> dict | None:
         "minutes": _clean(samples[time_col] / 60, 3),
         "km": _clean(samples["sumDistance"] / 1000, 4) if has_distance else None,
         "channels": channels,
+        "route": route_points(samples),
     }

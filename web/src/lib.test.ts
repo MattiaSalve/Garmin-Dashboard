@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fmtHM, rangeStats, sampleIndices, trailingAverage } from "./lib";
+import { fitRoute, fmtHM, mercator, rangeStats, sampleIndices, trailingAverage } from "./lib";
 
 describe("rangeStats", () => {
   const minutes = [0, 10, 20, 30];
@@ -40,4 +40,24 @@ it("samples evenly and always keeps the last point", () => {
   const idx = sampleIndices(0, 9999, 1000);
   expect(idx.length).toBeLessThanOrEqual(1001);
   expect(idx[idx.length - 1]).toBe(9999);
+});
+
+describe("fitRoute", () => {
+  const route: [number, number][] = [[46.0, 8.0], [46.01, 8.02], [46.02, 8.0]];
+  it("keeps every point inside the box with padding", () => {
+    const { points } = fitRoute(route, 800, 400, 28);
+    for (const [x, y] of points) {
+      expect(x).toBeGreaterThanOrEqual(28 - 1e-6);
+      expect(x).toBeLessThanOrEqual(772 + 1e-6);
+      expect(y).toBeGreaterThanOrEqual(28 - 1e-6);
+      expect(y).toBeLessThanOrEqual(372 + 1e-6);
+    }
+  });
+  it("puts north at the top", () => {
+    const { points } = fitRoute(route, 800, 400);
+    expect(points[2][1]).toBeLessThan(points[0][1]);
+  });
+  it("maps the equator and prime meridian to the world centre", () => {
+    expect(mercator(0, 0)).toEqual([0.5, 0.5]);
+  });
 });

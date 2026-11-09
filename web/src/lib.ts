@@ -115,3 +115,29 @@ export function sampleIndices(from: number, to: number, max = 1500): number[] {
   if (out[out.length - 1] !== to) out.push(to);
   return out;
 }
+
+/** Web-mercator world position (0..1 on both axes) of a latitude/longitude. */
+export function mercator(lat: number, lon: number): [number, number] {
+  const s = Math.sin((lat * Math.PI) / 180);
+  return [(lon + 180) / 360, 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)];
+}
+
+/**
+ * Fit a route into a width x height box. Returns pixel points plus the (fractional) zoom and top-left
+ * pixel offset, so map tiles can be laid under the same projection.
+ */
+export function fitRoute(route: [number, number][], width: number, height: number, pad = 28, maxZoom = 18) {
+  const world = route.map(([la, lo]) => mercator(la, lo));
+  const xs = world.map((p) => p[0]);
+  const ys = world.map((p) => p[1]);
+  const [minX, maxX, minY, maxY] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const spanX = Math.max(maxX - minX, 1e-9);
+  const spanY = Math.max(maxY - minY, 1e-9);
+  // 256 px tiles: world size in pixels is 256 * 2^zoom.
+  const fit = Math.min((width - 2 * pad) / (spanX * 256), (height - 2 * pad) / (spanY * 256));
+  const zoom = Math.min(Math.log2(fit), maxZoom);
+  const scale = 256 * 2 ** zoom;
+  const left = ((minX + maxX) / 2) * scale - width / 2;
+  const top = ((minY + maxY) / 2) * scale - height / 2;
+  return { zoom, left, top, points: world.map(([x, y]): [number, number] => [x * scale - left, y * scale - top]) };
+}
