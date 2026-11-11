@@ -1,24 +1,16 @@
-import { useState } from "react";
 import {
-  Area, Bar, BarChart, CartesianGrid, ComposedChart, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
+  Area, CartesianGrid, ComposedChart, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
-import { ActivityRow, ActivityTable, Banner, ChartTooltip, Loading, Metric, Pills } from "../components";
+import { Link } from "react-router-dom";
+import { ActivityRow, Banner, ChartTooltip, Loading, Metric } from "../components";
 import { query, useFetch } from "../api";
 import { ZONE_COLORS, daysAgo, fmt, fmtDuration } from "../lib";
-import { Coach } from "./Coach";
+import { SPORTS, TIME_OPTIONS, useWorkout, type Sport } from "../workout";
 import { WorkoutChart, WorkoutStep, stepTarget } from "./WorkoutChart";
 
-const HRV = "#1e88e5", RHR = "#e53935", SLEEP = "#8e24aa", LOAD = "#bdbdbd";
-const TIME_OPTIONS: Record<Sport, number[]> = {
-  cycling: [30, 45, 60, 75, 90, 120, 150, 180],
-  running: [20, 30, 40, 45, 60, 75, 90, 120],
-  swimming: [20, 30, 40, 45, 60, 75, 90],
-};
-type Sport = "cycling" | "running" | "swimming";
-const SPORTS: Sport[] = ["cycling", "running", "swimming"];
+const HRV = "#1e88e5";
 const SPORT_LABEL: Record<Sport, string> = { cycling: "Cycling", running: "Running", swimming: "Swimming" };
 const LONGEST: Record<Sport, string> = { cycling: "ride", running: "run", swimming: "swim" };
-const SPORT_KEY = "workout_sport";
 interface Level { level: string; source: "set" | "estimated"; reasons: string[] }
 
 interface Wellness {
@@ -26,7 +18,7 @@ interface Wellness {
   hrv_status: string | null; rhr: number | null; sleep_score: number | null; sleep_s: number | null; bb_high: number | null;
 }
 interface Signal { name: string; status: string; value: string; explanation: string }
-interface HomeData {
+export interface HomeData {
   week_hours_all: number;
   today: string; has_wellness: boolean; sport: Sport; levels: Record<Sport, Level>; threshold_pace_s: number | null; pace_unit: string;
   readiness: { level: "green" | "amber" | "red"; score: number; headline: string; signals: Signal[]; hrv_range: [number, number] | null };
@@ -41,31 +33,21 @@ interface HomeData {
   ftp_trend: { month: string; ftp_estimate: number }[];
 }
 
+export function useHomeData(minutes: number, sport: Sport) {
+  return useFetch<HomeData>(`/home${query({ minutes, sport })}`);
+}
+
 const signed = (v: number, digits = 0) => `${v >= 0 ? "+" : ""}${v.toFixed(digits)}`;
 
 export function Home() {
-  const [minutes, setMinutes] = useState(60);
-  const [sport, setSportState] = useState<Sport>(() => {
-    const saved = localStorage.getItem(SPORT_KEY) as Sport | null;
-    return saved && SPORTS.includes(saved) ? saved : "cycling";
-  });
-  const { data, error, loading } = useFetch<HomeData>(`/home${query({ minutes, sport })}`);
-
-  function setSport(next: Sport) {
-    localStorage.setItem(SPORT_KEY, next);
-    setSportState(next);
-    // Keep the chosen time if the new sport offers it, otherwise the closest option.
-    const options = TIME_OPTIONS[next];
-    setMinutes(options.reduce((best, o) => (Math.abs(o - minutes) < Math.abs(best - minutes) ? o : best)));
-  }
+  const { minutes, setMinutes, sport, setSport } = useWorkout();
+  const { data, error, loading } = useHomeData(minutes, sport);
 
   if (!data) return <Loading error={error} loading={loading} />;
   return (
     <>
       <Today d={data} minutes={minutes} setMinutes={setMinutes} sport={sport} setSport={setSport} />
-      <Recovery d={data} />
-      <Week d={data} />
-      <Records d={data} />
+      <RecoverySummary d={data} />
     </>
   );
 }
@@ -75,6 +57,8 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
 }) {
   const options = TIME_OPTIONS[sport];
   const level = d.levels[sport];
+  const { override, clearOverride } = useWorkout();
+  const w = override ?? d.workout;
   const r = d.readiness;
   const t = d.today_row;
   const date = new Date(d.today + "T12:00:00").toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
@@ -97,10 +81,12 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
             <li key={s.name}><span className={`dot ${s.status.replace(" ", "")}`} /><b>{s.name}</b> · {s.value} · {s.explanation}</li>
           ))}
         </ul>
+        {w.rationale.length > 1 ? <ul>{w.rationale.slice(1).map((x) => <li key={x}>{x}</li>)}</ul> : null}
         <p className="muted">Each caution costs 15 points and each bad signal 35. 75+ is green, 45–74 amber, below 45 red. Set your own HRV range in Settings.</p>
       </details>
 
-      <h3>{d.workout.steps.length ? "Suggested workout" : "Suggestion"} · {d.workout.name}</h3>
+      <h3>{override ? "Coach's workout" : w.steps.length ? "Suggested workout" : "Suggestion"} · {w.name}</h3>
+      {override ? <p><Banner kind="info">You accepted this workout from the coach. <button className="secondary" onClick={clearOverride}>Back to suggested workout</button></Banner></p> : null}
       <div className="row">
         <label className="field">Sport today
           <select value={sport} onChange={(e) => setSport(e.target.value as Sport)}>
@@ -119,96 +105,64 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
         <input type="range" min={0} max={options.length - 1} value={Math.max(options.indexOf(minutes), 0)}
           onChange={(e) => setMinutes(options[Number(e.target.value)])} />
       </label>
-      <p className="muted">{d.workout.purpose}{d.workout.steps.length ? ` · ${d.workout.minutes} min` : ""}</p>
-      <ul>{d.workout.rationale.map((x) => <li key={x}>{x}</li>)}</ul>
-      {d.workout.steps.length ? <WorkoutChart steps={d.workout.steps} ftp={d.ftp} sport={sport} /> : null}
-      {sport !== "cycling" && !d.threshold_pace_s && d.workout.steps.length
+      <p className="muted">{w.purpose}{w.steps.length ? ` · ${w.minutes} min` : ""}</p>
+      {w.rationale[0] ? <p className="muted">{w.rationale[0]}</p> : null}
+      {w.steps.length ? <WorkoutChart steps={w.steps} ftp={d.ftp} sport={sport} /> : null}
+      {sport !== "cycling" && !d.threshold_pace_s && w.steps.length
         ? <p className="muted">Add your threshold pace in Settings to see target paces; until then steps show effort on a 1–10 scale.</p> : null}
-      {d.workout.steps.length ? <details>
+      {w.steps.length ? <details>
         <summary>Steps</summary>
         <table>
           <thead><tr><th>Step</th><th className="num">Min</th><th className="num">Target</th><th className="num">{sport === "cycling" ? "% FTP" : "% threshold"}</th></tr></thead>
-          <tbody>{d.workout.steps.map((s, i) => (
+          <tbody>{w.steps.map((s, i) => (
             <tr key={i}><td>{s.label}</td><td className="num">{Math.round(s.minutes)}</td><td className="num">{stepTarget(s)}</td><td className="num">{s.pct_ftp}</td></tr>
           ))}</tbody>
         </table>
       </details> : null}
-      {d.workout.note ? <p className="muted">Note: {d.workout.note}</p> : null}
-      <Coach minutes={minutes} ftp={d.ftp} sport={sport} thresholdPace={d.threshold_pace_s} paceUnit={d.pace_unit} />
+      {w.note ? <p className="muted">Note: {w.note}</p> : null}
     </section>
   );
 }
 
-function Recovery({ d }: { d: HomeData }) {
-  const [days, setDays] = useState(30);
-  const since = daysAgo(days - 1);
+function RecoverySummary({ d }: { d: HomeData }) {
+  const since = daysAgo(29);
   const rows = d.wellness.filter((w) => w.day >= since);
-  const loads = d.intensity.filter((l) => l.day >= since);
-  const hasHrv = rows.some((w) => w.hrv_avg !== null);
   const data = rows.map((w) => ({
     ...w,
     band: w.hrv_baseline_low !== null && w.hrv_baseline_high !== null ? [w.hrv_baseline_low, w.hrv_baseline_high] : null,
   }));
-  const shortDay = (s: string) => s.slice(5);
+  const hasHrv = rows.some((w) => w.hrv_avg !== null);
+  const r = d.readiness;
   return (
     <section className="card">
-      <h2>Recovery trends <Pills options={[30, 90]} value={days} onChange={setDays} label={(n) => `${n} days`} /></h2>
-      {!hasHrv ? <Banner kind="info">No HRV data in this range yet.</Banner> : (
-        <>
-          <div className="muted">HRV · shaded band is your Garmin baseline</div>
-          <ResponsiveContainer width="100%" height={220}>
-            <ComposedChart data={data}>
-              <CartesianGrid strokeOpacity={0.2} />
-              <XAxis dataKey="day" tickFormatter={shortDay} minTickGap={24} />
-              <YAxis domain={["auto", "auto"]} width={40} />
-              <Tooltip content={({ payload, label }) => {
-                const p = payload?.[0]?.payload as Wellness | undefined;
-                return p ? <ChartTooltip title={String(label)} rows={[
-                  { name: "HRV (ms)", value: fmt(p.hrv_avg, 0), color: HRV }, { name: "Garmin status", value: p.hrv_status ?? "–" },
-                ]} /> : null;
-              }} />
-              <Area dataKey="band" stroke="none" fill={HRV} fillOpacity={0.15} isAnimationActive={false} connectNulls />
-              <Line dataKey="hrv_avg" stroke={HRV} dot={{ r: 3 }} connectNulls isAnimationActive={false} />
-            </ComposedChart>
-          </ResponsiveContainer>
-          {loads.length ? (
-            <ResponsiveContainer width="100%" height={80}>
-              <BarChart data={loads}>
-                <XAxis dataKey="day" tickFormatter={shortDay} minTickGap={24} />
-                <YAxis width={40} />
-                <Tooltip content={({ payload, label }) => payload?.length ? <ChartTooltip title={String(label)} rows={[{ name: "Training load", value: fmt(payload[0].value as number) }]} /> : null} />
-                <Bar dataKey="load" fill={LOAD} isAnimationActive={false} />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : null}
-        </>
-      )}
-      <div className="grid" style={{ marginTop: 12 }}>
-        <SmallLine data={rows} dataKey="rhr" title="Resting HR (bpm)" color={RHR} />
-        <SmallLine data={rows} dataKey="sleep_score" title="Sleep score" color={SLEEP} />
+      <div className="card-head">
+        <h2>Recovery · last 30 days</h2>
+        <Link to="/trends">View trends →</Link>
       </div>
+      {!hasHrv ? <Banner kind="info">No HRV data in this range yet.</Banner> : (
+        <ResponsiveContainer width="100%" height={70}>
+          <ComposedChart data={data}>
+            <XAxis dataKey="day" hide />
+            <YAxis domain={["auto", "auto"]} hide />
+            <Tooltip content={({ payload, label }) => {
+              const p = payload?.[0]?.payload as Wellness | undefined;
+              return p ? <ChartTooltip title={String(label)} rows={[{ name: "HRV (ms)", value: fmt(p.hrv_avg, 0), color: HRV }]} /> : null;
+            }} />
+            <Area dataKey="band" stroke="none" fill={HRV} fillOpacity={0.15} isAnimationActive={false} connectNulls />
+            <Line dataKey="hrv_avg" stroke={HRV} dot={false} connectNulls isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      )}
+      <p className="muted">
+        {d.today_row?.hrv_avg ? `HRV ${fmt(d.today_row.hrv_avg)} ms` : "No HRV today"}
+        {r.hrv_range ? ` · range ${r.hrv_range[0].toFixed(0)}–${r.hrv_range[1].toFixed(0)}` : ""}
+      </p>
     </section>
   );
 }
 
-function SmallLine({ data, dataKey, title, color }: { data: Wellness[]; dataKey: keyof Wellness; title: string; color: string }) {
-  return (
-    <div>
-      <div className="muted">{title}</div>
-      <ResponsiveContainer width="100%" height={160}>
-        <LineChart data={data}>
-          <CartesianGrid strokeOpacity={0.2} />
-          <XAxis dataKey="day" tickFormatter={(s: string) => s.slice(5)} minTickGap={24} />
-          <YAxis domain={["auto", "auto"]} width={36} />
-          <Tooltip content={({ payload, label }) => payload?.length ? <ChartTooltip title={String(label)} rows={[{ name: title, value: fmt(payload[0].value as number) }]} /> : null} />
-          <Line dataKey={dataKey} stroke={color} dot={{ r: 2 }} connectNulls isAnimationActive={false} />
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
 
-function Week({ d }: { d: HomeData }) {
+export function Week({ d }: { d: HomeData }) {
   const w = d.week;
   const target = d.settings.weekly_hours_target;
   const total = w.easy_h + w.moderate_h + w.hard_h;
@@ -241,12 +195,11 @@ function Week({ d }: { d: HomeData }) {
           ? <p><Banner kind="amber">Fitness (all sports) rose {d.ramp.toFixed(1)} points in 7 days. Ramping this fast raises injury and illness risk.</Banner></p>
           : <p className="muted">Ramp rate: fitness (all sports) {signed(d.ramp, 1)} in the last 7 days (keep it under {d.ramp_warning}).</p>
       ) : null}
-      <ActivityTable rows={d.week_activities} />
     </section>
   );
 }
 
-function Records({ d }: { d: HomeData }) {
+export function Records({ d }: { d: HomeData }) {
   const y = d.year;
   const expected = y.goal ? (y.goal * y.days_elapsed) / y.days_in_year : null;
   return (

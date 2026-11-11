@@ -32,7 +32,7 @@ export function Ride() {
   ];
   return (
     <section className="card">
-      <p><Link to="/activities">← Back</Link></p>
+      <p><Link to="/week">← Back</Link></p>
       <h2>{String(r.activity_name || "Untitled")} · {displaySport(String(r.sport_type ?? ""))}</h2>
       <p className="muted">Started {String(r.start_time_local)}{r.location_name ? ` · ${r.location_name}` : ""}</p>
       <div className="grid">

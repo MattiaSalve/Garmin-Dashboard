@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "garmin-dashboards",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "garmin-dashboards"],
+      "port": 8000
+    }
+  ]
+}

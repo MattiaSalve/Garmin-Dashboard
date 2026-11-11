@@ -180,14 +180,19 @@ def ask_coach(
     if not key:
         raise CoachError("Enter your OpenRouter API key first.")
     schema = json.dumps(CoachAdvice.model_json_schema())
+    turns = [{"role": m.role, "content": m.content} for m in history or []]
+    opening = json.dumps(payload)
+    if turns and turns[0]["role"] == "user":
+        # The athlete wrote the first message themselves: send it with the data summary, not as a second user turn.
+        opening += "\n\nThe athlete's message: " + turns.pop(0)["content"]
     body = {
         "model": model or DEFAULT_MODEL,
         "max_tokens": 2000,
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": f"{SYSTEM}\n\nReply with a single JSON object matching this schema:\n{schema}"},
-            {"role": "user", "content": json.dumps(payload)},
-            *({"role": m.role, "content": m.content} for m in history or []),
+            {"role": "user", "content": opening},
+            *turns,
         ],
     }
     data = post(body, key)

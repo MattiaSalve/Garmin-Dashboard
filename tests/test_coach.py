@@ -80,6 +80,19 @@ def test_follow_up_keeps_context(monkeypatch):
     assert seen["messages"][-1]["content"] == "Make it 45 minutes"
 
 
+def test_custom_first_message_joins_the_opening_turn():
+    seen = {}
+
+    def post(body, key):
+        seen["messages"] = body["messages"]
+        return reply(json.dumps({"summary": "Ok.", "agree_with_suggestion": True, "adjusted_steps": None, "cautions": []}))
+
+    history = [coach.ChatMessage(role="user", content="I only have 40 minutes")]
+    coach.ask_coach(payload(), post=post, api_key="k", history=history)
+    assert [m["role"] for m in seen["messages"]] == ["system", "user"]  # no two user turns in a row
+    assert seen["messages"][1]["content"].endswith("The athlete's message: I only have 40 minutes")
+
+
 def test_goals_and_targets_reach_the_payload():
     r = Readiness("amber", 70, [], "h", (96, 124), True)
     p = coach.build_payload(r, suggest(r, 60, INTENSITY, date(2026, 11, 8)), WELLNESS, INTENSITY, -5.0, 252,

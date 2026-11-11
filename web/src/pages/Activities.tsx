@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import { query, useFetch } from "../api";
 import { ActivityRow, ActivityTable, Loading, Metric } from "../components";
 import { daysAgo, displaySport, fmt, fmtHM, isoDate } from "../lib";
+import { useWorkout } from "../workout";
+import { Week, useHomeData } from "./Home";
 
 interface Summary {
   activity_count: number; total_distance_km: number; total_moving_duration_h: number; total_elevation_gain_m: number;
@@ -15,7 +17,10 @@ export function Activities() {
   const prev = useFetch<Summary>(`/summary${query({ start: daysAgo(13), end: daysAgo(7) })}`);
   const rows = useFetch<ActivityRow[]>(`/activities${query({ start: daysAgo(6), end: daysAgo(0) })}`);
   const s = week.data, p = prev.data;
+  const { sport, minutes } = useWorkout();
+  const home = useHomeData(minutes, sport);
   return (
+    <>
     <section className="card">
       <h2>Last 7 days</h2>
       <Loading error={week.error ?? rows.error} loading={week.loading} />
@@ -32,6 +37,8 @@ export function Activities() {
       ) : null}
       {rows.data ? <ActivityTable rows={rows.data} /> : null}
     </section>
+    {home.data ? <Week d={home.data} /> : <Loading error={home.error} loading={home.loading} />}
+    </>
   );
 }
 

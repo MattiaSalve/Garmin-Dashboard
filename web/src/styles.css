@@ -22,6 +22,7 @@ h3 { margin: 16px 0 8px; font-size: 1rem; }
 .nav a.active { background: var(--card); color: var(--text); box-shadow: 0 0 0 1px var(--line); }
 .who { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 0.9rem; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+.card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
 .metric { padding: 8px 0; }
 .metric .label { color: var(--muted); font-size: 0.8rem; }
@@ -58,6 +59,28 @@ progress { width: 100%; height: 10px; }
 details summary { cursor: pointer; color: var(--muted); }
 .tooltip { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 0.85rem; }
 .tooltip .t { color: var(--muted); margin-bottom: 4px; }
+.workout-chart { position: relative; }
+.workout-tip { position: absolute; pointer-events: none; transform: translate(-50%, calc(-100% - 12px)); white-space: nowrap; z-index: 2; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); }
+.coach-fab { position: fixed; right: 20px; bottom: 20px; z-index: 20; border-radius: 999px; padding: 12px 18px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25); transition: opacity 0.18s ease, transform 0.18s ease; }
+.coach-fab.hidden { opacity: 0; transform: scale(0.85); pointer-events: none; }
+.coach-panel {
+  position: fixed; right: 20px; bottom: 20px; z-index: 20; margin: 0; padding: 0; display: flex; flex-direction: column;
+  width: min(420px, calc(100vw - 24px)); height: min(78vh, 720px); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+  transform-origin: bottom right; opacity: 0; transform: translateY(16px) scale(0.96); visibility: hidden; pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease, visibility 0s linear 0.2s;
+}
+.coach-panel.open { opacity: 1; transform: none; visibility: visible; pointer-events: auto; transition-delay: 0s; }
+.coach-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 12px 12px 16px; border-bottom: 1px solid var(--line); }
+.coach-head h2 { margin: 0; }
+.coach-close { background: transparent; color: var(--muted); font-size: 1.5rem; line-height: 1; padding: 2px 10px; }
+.coach-close:hover { color: var(--text); }
+.coach { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.coach-body { flex: 1; overflow-y: auto; padding: 12px 16px; }
+.coach-body .card { margin-bottom: 12px; }
+.coach-composer { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+.coach-composer textarea { width: 100%; resize: none; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; color: inherit; }
+.coach-actions { display: flex; justify-content: space-between; gap: 8px; }
+@media (prefers-reduced-motion: reduce) { .coach-panel, .coach-fab { transition: none; } }
 .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.85rem; color: var(--muted); margin-top: 6px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
 @media (max-width: 600px) { .app { padding: 10px; } .card { padding: 12px; } }
