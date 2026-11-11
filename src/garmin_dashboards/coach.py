@@ -10,7 +10,9 @@ import urllib.error
 import urllib.request
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+import re
+
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from garmin_dashboards.mode import is_local
 from garmin_dashboards.readiness import Readiness
@@ -77,21 +79,72 @@ class CoachStep(BaseModel):
     label: str
 
 
+def _first_number(value, default: int) -> int:
+    """Models write numbers as 7, 7.5, "7", "7-8" or "90 s": take the first one."""
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return round(value)
+    match = re.search(r"\d+(?:\.\d+)?", str(value))
+    return round(float(match.group())) if match else default
+
+
+_GROUP_WORDS = (
+    ("mobility", ("mobil", "stretch", "warm")),
+    ("core", ("core", "abs", "trunk")),
+    ("push", ("push", "chest", "shoulder", "tricep")),
+    ("pull", ("pull", "back", "bicep", "lat")),
+    ("legs", ("leg", "quad", "glute", "ham", "calf", "lower")),
+)
+
+
 class CoachExercise(BaseModel):
+    """One gym exercise. Parsing is forgiving about how a model words numbers and muscle groups."""
     name: str
     group: Literal["legs", "push", "pull", "core", "mobility"] = "legs"
-    sets: int
-    reps: str
-    rpe: int = Field(ge=1, le=10)
+    sets: int = 3
+    reps: str = ""
+    rpe: int = 7
     rest_s: int = 60
     note: str = ""
+
+    @field_validator("group", mode="before")
+    @classmethod
+    def _group(cls, v):
+        text = str(v or "").lower()
+        return next((g for g, words in _GROUP_WORDS if any(w in text for w in words)), "legs")
+
+    @field_validator("sets", mode="before")
+    @classmethod
+    def _sets(cls, v):
+        return min(10, max(1, _first_number(v, 3)))
+
+    @field_validator("rpe", mode="before")
+    @classmethod
+    def _rpe(cls, v):
+        return min(10, max(1, _first_number(v, 7)))
+
+    @field_validator("rest_s", mode="before")
+    @classmethod
+    def _rest(cls, v):
+        return min(600, max(0, _first_number(v, 60)))
+
+    @field_validator("reps", mode="before")
+    @classmethod
+    def _reps(cls, v):
+        return "" if v is None else str(v)
+
+    @field_validator("note", mode="before")
+    @classmethod
+    def _note(cls, v):
+        return "" if v is None else str(v)
 
 
 class CoachAdvice(BaseModel):
     summary: str
     agree_with_suggestion: bool
-    adjusted_steps: list[CoachStep] | None
-    cautions: list[str]
+    adjusted_steps: list[CoachStep] | None = None
+    cautions: list[str] = Field(default_factory=list)
     adjusted_exercises: list[CoachExercise] | None = None  # gym sessions only
 
 
@@ -224,6 +277,10 @@ def ask_coach(
     if choice.get("finish_reason") == "content_filter":
         raise CoachError("The coach declined to answer this request.")
     text = (choice.get("message") or {}).get("content") or ""
+    # Some models wrap the JSON in a code fence or add a sentence around it.
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        text = text[start:end + 1]
     try:
         return CoachAdvice.model_validate_json(text)
     except ValidationError as exc:

@@ -99,3 +99,19 @@ def test_goals_and_targets_reach_the_payload():
                             goals="Ride 200 km in June", targets={"weekly_hours": 6, "yearly_km": None})
     assert p["athlete_goals"] == "Ride 200 km in June" and p["targets"] == {"weekly_hours": 6}
     assert payload()["athlete_goals"] is None
+
+
+def test_gym_reply_with_loose_formatting_is_accepted():
+    messy = '''Here you go:
+```json
+{"summary": "Legs today.", "agree_with_suggestion": false,
+ "adjusted_exercises": [
+   {"name": "Squat", "group": "Quads and glutes", "sets": "3", "reps": 8, "rpe": "7-8", "rest_s": "90 s", "note": null},
+   {"name": "Plank", "group": "abs", "sets": 3.0, "reps": "45 s", "rpe": 12}
+ ]}
+```'''
+    advice = coach.ask_coach(payload(), post=lambda b, k: reply(messy), api_key="k")
+    first, second = advice.adjusted_exercises
+    assert (first.group, first.sets, first.reps, first.rpe, first.rest_s, first.note) == ("legs", 3, "8", 7, 90, "")
+    assert second.group == "core" and second.rpe == 10
+    assert advice.adjusted_steps is None and advice.cautions == []
