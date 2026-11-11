@@ -115,3 +115,14 @@ def test_gym_reply_with_loose_formatting_is_accepted():
     assert (first.group, first.sets, first.reps, first.rpe, first.rest_s, first.note) == ("legs", 3, "8", 7, 90, "")
     assert second.group == "core" and second.rpe == 10
     assert advice.adjusted_steps is None and advice.cautions == []
+
+
+def test_workout_sport_is_normalised_and_optional():
+    def ask(extra):
+        body = {"summary": "s", "agree_with_suggestion": False, **extra}
+        return coach.ask_coach(payload(), post=lambda b, k: reply(json.dumps(body)), api_key="k")
+
+    assert ask({}).workout_sport is None
+    assert ask({"workout_sport": "Bodyweight session"}).workout_sport == "gym"
+    assert ask({"workout_sport": "running"}).workout_sport == "running"
+    assert ask({"workout_sport": "yoga"}).workout_sport is None

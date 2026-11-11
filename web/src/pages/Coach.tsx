@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, useFetch } from "../api";
 import { useNavigate } from "react-router-dom";
 import { Banner } from "../components";
-import { useWorkout, type Workout } from "../workout";
+import { useWorkout, type Sport, type Workout } from "../workout";
 import { GymSession, gymMinutes, type GymExercise } from "./GymSession";
 import type { WorkoutStep } from "./WorkoutChart";
 
@@ -11,6 +11,8 @@ interface Advice {
   agree_with_suggestion: boolean;
   adjusted_steps: { minutes: number; pct_ftp_low: number; pct_ftp_high: number; label: string }[] | null;
   adjusted_exercises?: GymExercise[] | null;
+  /** Set when the coach proposes a workout for a different sport than the selected one. */
+  workout_sport?: Sport | null;
   cautions: string[];
 }
 
@@ -33,6 +35,7 @@ export function Coach({ ftp, thresholdPace, paceUnit }: { ftp: number; threshold
   const { minutes, sport, applyWorkout, gymFocus } = useWorkout();
   const navigate = useNavigate();
   const [applied, setApplied] = useState<number | null>(null);
+  const keepThread = useRef(false); // accepting a workout for another sport switches sport; that must not wipe the chat
   const models = useFetch<{ models: string[]; default: string }>("/coach/models");
   const [model, setModel] = useState("");
   const [custom, setCustom] = useState("");
@@ -48,7 +51,10 @@ export function Coach({ ftp, thresholdPace, paceUnit }: { ftp: number; threshold
   useEffect(() => {
     if (models.data && !model) setModel(models.data.default);
   }, [models.data, model]);
-  useEffect(() => { setThread([]); setApplied(null); }, [minutes, model, custom, sport, gymFocus]);
+  useEffect(() => {
+    if (keepThread.current) { keepThread.current = false; return; }
+    setThread([]); setApplied(null);
+  }, [minutes, model, custom, sport, gymFocus]);
 
   useEffect(() => {
     if (goals.data) setGoalsText(goals.data.goals);
@@ -138,9 +144,15 @@ export function Coach({ ftp, thresholdPace, paceUnit }: { ftp: number; threshold
           t.role === "user" ? (
             <div key={i} className="card" style={{ marginLeft: 48 }}><b>You</b><p>{t.content}</p></div>
           ) : (
-            <AdviceCard key={i} advice={t.advice} ftp={ftp} sport={sport} thresholdPace={thresholdPace} paceUnit={paceUnit}
+            <AdviceCard key={i} advice={t.advice} ftp={ftp} sport={t.advice.workout_sport ?? sport} selectedSport={sport} thresholdPace={thresholdPace} paceUnit={paceUnit}
               applied={applied === i}
-              onAccept={() => { applyWorkout(toWorkout(t.advice, ftp, sport, thresholdPace, paceUnit)); setApplied(i); navigate("/"); }} />
+              onAccept={() => {
+                const target = t.advice.workout_sport ?? sport;
+                if (target !== sport) keepThread.current = true;
+                applyWorkout(toWorkout(t.advice, ftp, target, thresholdPace, paceUnit), target);
+                setApplied(i);
+                navigate("/");
+              }} />
           ),
         )}
         {busy ? <p className="muted">Coach is thinking…</p> : null}
@@ -163,14 +175,18 @@ export function Coach({ ftp, thresholdPace, paceUnit }: { ftp: number; threshold
 
 const pace = (s: number) => `${Math.floor(Math.round(s) / 60)}:${String(Math.round(s) % 60).padStart(2, "0")}`;
 
-function AdviceCard({ advice, ftp, sport, thresholdPace, paceUnit, applied, onAccept }: { advice: Advice; ftp: number; sport: string; thresholdPace: number | null; paceUnit: string; applied: boolean; onAccept: () => void }) {
+const SPORT_NAME: Record<string, string> = { cycling: "cycling", running: "running", swimming: "swimming", gym: "gym" };
+
+function AdviceCard({ advice, ftp, sport, selectedSport, thresholdPace, paceUnit, applied, onAccept }: { advice: Advice; ftp: number; sport: string; selectedSport: string; thresholdPace: number | null; paceUnit: string; applied: boolean; onAccept: () => void }) {
   // Cycling targets become watts; running targets become pace when a threshold pace is set.
   const target = (s: Advice["adjusted_steps"] extends (infer T)[] | null ? T : never) =>
     sport === "cycling" ? `${Math.round((s.pct_ftp_low * ftp) / 100)}–${Math.round((s.pct_ftp_high * ftp) / 100)} W`
       : thresholdPace && s.pct_ftp_low >= 55 ? `${pace((thresholdPace * 100) / s.pct_ftp_high)}–${pace((thresholdPace * 100) / s.pct_ftp_low)} ${paceUnit}` : "–";
   return (
     <div className="card">
-      <b>Coach · {advice.agree_with_suggestion ? "agrees with" : "suggests changing"} the plan</b>
+      <b>Coach · {sport !== selectedSport
+        ? `suggests a ${SPORT_NAME[sport] ?? sport} workout instead`
+        : `${advice.agree_with_suggestion ? "agrees with" : "suggests changing"} the plan`}</b>
       <p>{advice.summary}</p>
       <ul>{advice.cautions.map((c) => <li key={c}>{c}</li>)}</ul>
       {advice.adjusted_steps ? (
@@ -190,8 +206,8 @@ function AdviceCard({ advice, ftp, sport, thresholdPace, paceUnit, applied, onAc
       {advice.adjusted_exercises?.length ? <GymSession exercises={advice.adjusted_exercises} /> : null}
       {advice.adjusted_steps || advice.adjusted_exercises?.length ? (
         <p>
-          <button type="button" onClick={onAccept} disabled={applied}>{applied ? "Applied to Today ✓" : "Use this workout"}</button>
-          <span className="muted"> {applied ? "Shown as today's workout on Home." : "Replaces the suggested workout on Home."}</span>
+          <button type="button" onClick={onAccept} disabled={applied}>{applied ? "Applied to Today ✓" : sport !== selectedSport ? `Use this workout (switches to ${SPORT_NAME[sport] ?? sport})` : "Use this workout"}</button>
+          <span className="muted"> {applied ? "Shown as today's workout on Home." : sport !== selectedSport ? `Saved under ${SPORT_NAME[sport] ?? sport}; your ${selectedSport} workout stays as it was.` : "Replaces the suggested workout on Home."}</span>
         </p>
       ) : null}
     </div>

@@ -238,9 +238,8 @@ def _home_context(db: str, minutes: int, sport: str = "cycling", focus: str | No
     # Peak fitness over the last 90 days, from every sport: a general aerobic base that carries over somewhat.
     recent_fitness = [p["fitness"] for p in series if p["day"] >= today - timedelta(days=90)]
     levels = _levels(db, settings, today, max(recent_fitness) if recent_fitness else None)
-    trained = None
+    trained = gym.last_trained(strength_sessions(today - timedelta(days=60), today, db), today)
     if sport == gym.KEY:
-        trained = gym.last_trained(strength_sessions(today - timedelta(days=60), today, db), today)
         suggestion = gym.suggest(
             readiness, minutes, intensity, trained, today, gym.goal_from_setting(settings.get("gym_goal")), levels[sport]["level"], focus,
         )
@@ -375,7 +374,8 @@ def ask_coach(body: CoachBody, session: Session = Depends(current_session)) -> d
         sport=body.sport, levels={k: v["level"] for k, v in c["levels"].items()},
         threshold_pace_s=s.get(SPORTS[body.sport].pace_setting) if body.sport in SPORTS and SPORTS[body.sport].pace_setting else None,
         pace_unit=SPORTS[body.sport].pace_unit if body.sport in SPORTS else "",
-        gym=_gym_block(c["suggestion"], c["trained"]) if body.sport == gym.KEY else None,
+        # Always sent, so the coach can propose a gym workout when the athlete asks for one from another sport.
+        gym={"goal_label": gym.GOAL_LABEL[gym.goal_from_setting(s.get("gym_goal"))], "days_since": c["trained"]["days"]},
     )
     try:
         return coach.ask_coach(payload, model=body.model, api_key=body.api_key, history=body.history).model_dump()

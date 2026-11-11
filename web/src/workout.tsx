@@ -59,7 +59,8 @@ interface WorkoutState {
   setGymFocus: (f: string) => void;
   setSport: (s: Sport) => void;
   setMinutes: (m: number) => void;
-  applyWorkout: (w: Workout) => void;
+  /** Save a workout for a sport (the current one by default). For another sport this also switches to it. */
+  applyWorkout: (w: Workout, target?: Sport) => void;
   clearOverride: () => void;
 }
 
@@ -92,7 +93,16 @@ export function WorkoutProvider({ email, children }: { email: string; children: 
     setGymFocusState(f);
     update((current) => without(current, "gym"));
   }, [update]);
-  const applyWorkout = useCallback((w: Workout) => update((current) => ({ ...current, [sport]: { minutes, workout: w } })), [sport, minutes, update]);
+  const applyWorkout = useCallback((w: Workout, target: Sport = sport) => {
+    // The new sport may not offer the current time: use the closest option it does.
+    const m = target === sport ? minutes : TIME_OPTIONS[target].reduce((best, o) => (Math.abs(o - minutes) < Math.abs(best - minutes) ? o : best));
+    update((current) => ({ ...current, [target]: { minutes: m, workout: w } }));
+    if (target !== sport) {
+      try { localStorage.setItem(SPORT_KEY, target); } catch { /* private mode */ }
+      setSportState(target);
+      setMinutesState(m);
+    }
+  }, [sport, minutes, update]);
   const clearOverride = useCallback(() => update((current) => without(current, sport)), [sport, update]);
   const setSport = useCallback((next: Sport) => {
     try { localStorage.setItem(SPORT_KEY, next); } catch { /* private mode */ }

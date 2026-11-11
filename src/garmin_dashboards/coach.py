@@ -66,6 +66,12 @@ for today in "sport_today".
   training" protect their rides and runs (no heavy leg work within 48 h of hard training or before a key session,
   stop sets short of failure, favour legs, hips and core). Propose changes with the complete list in
   adjusted_exercises and leave adjusted_steps null. In every other sport leave adjusted_exercises null.
+- The workout you propose can be in a different sport from "sport_today" when the athlete's message points
+  that way (e.g. they ask for a bodyweight or home workout, or a run instead of a ride). Set "workout_sport" to
+  "cycling", "running", "swimming" or "gym" for the sport of the workout in adjusted_steps / adjusted_exercises.
+  Leave it null when the workout is for sport_today. A bodyweight, home, "no gym" or strength request is a
+  "gym" workout built from adjusted_exercises using bodyweight or minimal-equipment exercises. Use the "gym"
+  block (goal and days since each muscle group was trained) and the levels to fit it.
 - The athlete may follow up with a message, e.g. to change the plan (shorter, different focus, a hill
   they have to ride). Answer it directly, keep the earlier context, and when the workout changes return
   the complete updated adjusted_steps (not just the changed part). The athlete's request overrides
@@ -140,12 +146,28 @@ class CoachExercise(BaseModel):
         return "" if v is None else str(v)
 
 
+_SPORT_WORDS = (
+    ("gym", ("gym", "strength", "weight", "bodyweight", "body weight", "resistance")),
+    ("running", ("run",)),
+    ("swimming", ("swim",)),
+    ("cycling", ("cycl", "bike", "ride")),
+)
+
+
 class CoachAdvice(BaseModel):
     summary: str
     agree_with_suggestion: bool
+    # The sport of the proposed workout when it isn't the one the athlete selected (null = the selected sport).
+    workout_sport: Literal["cycling", "running", "swimming", "gym"] | None = None
     adjusted_steps: list[CoachStep] | None = None
     cautions: list[str] = Field(default_factory=list)
     adjusted_exercises: list[CoachExercise] | None = None  # gym sessions only
+
+    @field_validator("workout_sport", mode="before")
+    @classmethod
+    def _workout_sport(cls, v):
+        text = str(v or "").lower()
+        return next((s for s, words in _SPORT_WORDS if any(w in text for w in words)), None)
 
 
 class ChatMessage(BaseModel):
