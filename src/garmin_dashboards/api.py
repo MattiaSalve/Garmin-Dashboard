@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from garminconnect.activity_details import parse_activity_detail_metrics
 from pydantic import BaseModel, Field
 
-from garmin_dashboards import auth, coach
+from garmin_dashboards import auth, coach, gym
 from garmin_dashboards.db import SETTING_DEFAULTS, all_settings, get_text_setting, set_text_setting, init_db, ensure_user_db, resolve, set_setting
 from garmin_dashboards.fitness import fitness_series
 from garmin_dashboards.metrics import (
@@ -37,6 +37,7 @@ from garmin_dashboards.metrics import (
     power_prs,
     search_activities,
     sport_evidence,
+    strength_sessions,
     summary,
     week_progress,
     weekly_hr_zones,
@@ -199,21 +200,32 @@ def filters(session: Session = Depends(current_session)) -> dict:
 # ------------------------------------------------------------------ home and coach
 
 
+def _check_focus(focus: str | None) -> str | None:
+    if focus in (None, "", "auto"):
+        return None
+    if focus not in gym.FOCUS:
+        raise HTTPException(400, f"Unknown gym focus: {focus}. Choose one of {', '.join(gym.FOCUS)}.")
+    return focus
+
+
 def _check_sport(sport: str) -> str:
-    if sport not in SPORTS:
-        raise HTTPException(400, f"Unknown sport: {sport}. Choose one of {', '.join(SPORTS)}.")
+    if sport != gym.KEY and sport not in SPORTS:
+        raise HTTPException(400, f"Unknown sport: {sport}. Choose one of {', '.join([*SPORTS, gym.KEY])}.")
     return sport
 
 
 def _levels(db: str, settings: dict, today: date, aerobic_fitness: float | None) -> dict[str, dict]:
     """Level per sport: the one the athlete set, else judged from their training in the sport and overall fitness."""
-    return {
+    levels = {
         key: assess_level(key, settings.get(f"level_{key}"), sport_evidence(key.title(), today, db), aerobic_fitness)
         for key in SPORTS
     }
+    sessions = summary(today - timedelta(days=83), today, gym.GROUP_NAME, db)["activity_count"]
+    levels[gym.KEY] = gym.assess_level(settings.get("level_gym"), sessions)
+    return levels
 
 
-def _home_context(db: str, minutes: int, sport: str = "cycling") -> dict:
+def _home_context(db: str, minutes: int, sport: str = "cycling", focus: str | None = None) -> dict:
     today = date.today()
     settings = all_settings(db)
     wellness = daily_wellness(today - timedelta(days=90), today, db)
@@ -226,27 +238,53 @@ def _home_context(db: str, minutes: int, sport: str = "cycling") -> dict:
     # Peak fitness over the last 90 days, from every sport: a general aerobic base that carries over somewhat.
     recent_fitness = [p["fitness"] for p in series if p["day"] >= today - timedelta(days=90)]
     levels = _levels(db, settings, today, max(recent_fitness) if recent_fitness else None)
-    suggestion = suggest(readiness, minutes, intensity, today, sport, levels[sport]["level"])
+    trained = None
+    if sport == gym.KEY:
+        trained = gym.last_trained(strength_sessions(today - timedelta(days=60), today, db), today)
+        suggestion = gym.suggest(
+            readiness, minutes, intensity, trained, today, gym.goal_from_setting(settings.get("gym_goal")), levels[sport]["level"], focus,
+        )
+    else:
+        suggestion = suggest(readiness, minutes, intensity, today, sport, levels[sport]["level"])
     return {
-        "sport": sport, "levels": levels,
+        "sport": sport, "levels": levels, "trained": trained,
         "today": today, "settings": settings, "wellness": wellness, "intensity": intensity,
         "series": series, "form": form, "readiness": readiness, "suggestion": suggestion,
         "ftp": settings.get("ftp_w") or DEFAULT_FTP,
     }
 
 
+def _gym_workout(s: gym.GymSuggestion) -> dict:
+    """A gym session in the same shape as an endurance workout, with `exercises` instead of timed steps."""
+    return {
+        "key": s.session.key, "name": s.session.name, "purpose": s.session.purpose, "note": s.session.note,
+        "minutes": s.minutes, "rationale": s.rationale, "steps": [], "exercises": s.exercises,
+    }
+
+
+def _gym_block(s: gym.GymSuggestion, trained: dict) -> dict:
+    return {
+        "goal": s.goal, "goal_label": gym.GOAL_LABEL[s.goal],
+        "days_since": trained["days"], "unlabelled": trained["unlabelled"],
+        "labels": gym.GROUP_LABEL, "focus_options": gym.FOCUS_LABEL,
+    }
+
+
 @router.get("/home")
 def home(
-    minutes: int = Query(60, ge=20, le=300), sport: str = "cycling", session: Session = Depends(current_session),
+    minutes: int = Query(60, ge=20, le=300), sport: str = "cycling", focus: str | None = None,
+    session: Session = Depends(current_session),
 ) -> dict:
     db = session.db_path
     sport = _check_sport(sport)
-    group = sport.title()  # "cycling" -> the "Cycling" entry in SPORT_GROUPS
-    c = _home_context(db, minutes, sport)
+    focus = _check_focus(focus)
+    is_gym = sport == gym.KEY
+    group = gym.GROUP_NAME if is_gym else sport.title()  # "cycling" -> the "Cycling" entry in SPORT_GROUPS
+    c = _home_context(db, minutes, sport, focus)
     today, settings, series = c["today"], c["settings"], c["series"]
     suggestion, ftp = c["suggestion"], c["ftp"]
-    profile = SPORTS[sport]
-    pace = settings.get(profile.pace_setting) if profile.pace_setting else None
+    profile = None if is_gym else SPORTS[sport]
+    pace = settings.get(profile.pace_setting) if profile and profile.pace_setting else None
 
     week = week_progress(today, db, group)
     year_start = date(today.year, 1, 1)
@@ -263,14 +301,15 @@ def home(
         "form": c["form"],
         "ftp": ftp,
         "threshold_pace_s": pace,
-        "pace_unit": profile.pace_unit,
+        "pace_unit": profile.pace_unit if profile else "",
         "settings": settings,
-        "workout": {
+        "workout": _gym_workout(suggestion) if is_gym else {
             "key": suggestion.workout.key, "name": suggestion.workout.name,
             "purpose": suggestion.workout.purpose, "note": suggestion.workout.note,
             "minutes": suggestion.minutes, "rationale": suggestion.rationale,
             "steps": suggestion.in_targets(ftp, pace),
         },
+        "gym": _gym_block(suggestion, c["trained"]) if is_gym else None,
         "wellness": c["wellness"],
         "intensity": daily_intensity(today - timedelta(days=89), today, db),
         "week": week,
@@ -289,6 +328,7 @@ def home(
             "days_elapsed": (today - year_start).days,
             "days_in_year": (date(today.year, 12, 31) - year_start).days + 1,
             "longest": longest,
+            "sessions": summary(year_start, today, group, db)["activity_count"],
         },
         "ftp_trend": ftp_trend[-18:],
     }
@@ -297,6 +337,7 @@ def home(
 class CoachBody(BaseModel):
     minutes: int = 60
     sport: str = "cycling"
+    focus: str | None = None  # gym only: the session the athlete asked to train
     model: str | None = None
     api_key: str | None = None
     # Turns after the opening summary (the server rebuilds that fresh), ending with the athlete's message.
@@ -325,15 +366,16 @@ def coach_models() -> dict:
 
 @router.post("/coach")
 def ask_coach(body: CoachBody, session: Session = Depends(current_session)) -> dict:
-    c = _home_context(session.db_path, body.minutes, _check_sport(body.sport))
+    c = _home_context(session.db_path, body.minutes, _check_sport(body.sport), _check_focus(body.focus))
     s = c["settings"]
     payload = coach.build_payload(
         c["readiness"], c["suggestion"], c["wellness"], c["intensity"], c["form"], c["ftp"],
         goals=get_text_setting(GOALS_KEY, session.db_path),
         targets={"weekly_hours": s.get("weekly_hours_target"), "yearly_km": s.get("yearly_km_goal")},
         sport=body.sport, levels={k: v["level"] for k, v in c["levels"].items()},
-        threshold_pace_s=s.get(SPORTS[body.sport].pace_setting) if SPORTS[body.sport].pace_setting else None,
-        pace_unit=SPORTS[body.sport].pace_unit,
+        threshold_pace_s=s.get(SPORTS[body.sport].pace_setting) if body.sport in SPORTS and SPORTS[body.sport].pace_setting else None,
+        pace_unit=SPORTS[body.sport].pace_unit if body.sport in SPORTS else "",
+        gym=_gym_block(c["suggestion"], c["trained"]) if body.sport == gym.KEY else None,
     )
     try:
         return coach.ask_coach(payload, model=body.model, api_key=body.api_key, history=body.history).model_dump()

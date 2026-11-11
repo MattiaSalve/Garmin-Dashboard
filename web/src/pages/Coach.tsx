@@ -3,12 +3,14 @@ import { api, useFetch } from "../api";
 import { useNavigate } from "react-router-dom";
 import { Banner } from "../components";
 import { useWorkout, type Workout } from "../workout";
+import { GymSession, gymMinutes, type GymExercise } from "./GymSession";
 import type { WorkoutStep } from "./WorkoutChart";
 
 interface Advice {
   summary: string;
   agree_with_suggestion: boolean;
   adjusted_steps: { minutes: number; pct_ftp_low: number; pct_ftp_high: number; label: string }[] | null;
+  adjusted_exercises?: GymExercise[] | null;
   cautions: string[];
 }
 
@@ -28,7 +30,7 @@ function saveKey(key: string) {
 }
 
 export function Coach({ ftp, thresholdPace, paceUnit }: { ftp: number; thresholdPace: number | null; paceUnit: string }) {
-  const { minutes, sport, applyWorkout } = useWorkout();
+  const { minutes, sport, applyWorkout, gymFocus } = useWorkout();
   const navigate = useNavigate();
   const [applied, setApplied] = useState<number | null>(null);
   const models = useFetch<{ models: string[]; default: string }>("/coach/models");
@@ -46,7 +48,7 @@ export function Coach({ ftp, thresholdPace, paceUnit }: { ftp: number; threshold
   useEffect(() => {
     if (models.data && !model) setModel(models.data.default);
   }, [models.data, model]);
-  useEffect(() => { setThread([]); setApplied(null); }, [minutes, model, custom, sport]);
+  useEffect(() => { setThread([]); setApplied(null); }, [minutes, model, custom, sport, gymFocus]);
 
   useEffect(() => {
     if (goals.data) setGoalsText(goals.data.goals);
@@ -73,7 +75,7 @@ export function Coach({ ftp, thresholdPace, paceUnit }: { ftp: number; threshold
     try {
       const advice = await api<Advice>("/coach", {
         body: {
-          minutes, model: chosen || null, api_key: apiKey,
+          minutes, sport, focus: sport === "gym" && gymFocus !== "auto" ? gymFocus : null, model: chosen || null, api_key: apiKey,
           history: turns.map((t) => ({ role: t.role, content: t.content })),
         },
       });
@@ -181,7 +183,8 @@ function AdviceCard({ advice, ftp, sport, thresholdPace, paceUnit, applied, onAc
           </tbody>
         </table>
       ) : null}
-      {advice.adjusted_steps ? (
+      {advice.adjusted_exercises?.length ? <GymSession exercises={advice.adjusted_exercises} /> : null}
+      {advice.adjusted_steps || advice.adjusted_exercises?.length ? (
         <p>
           <button type="button" onClick={onAccept} disabled={applied}>{applied ? "Applied to Today ✓" : "Use this workout"}</button>
           <span className="muted"> {applied ? "Shown as today's workout on Home." : "Replaces the suggested workout on Home."}</span>
@@ -193,6 +196,12 @@ function AdviceCard({ advice, ftp, sport, thresholdPace, paceUnit, applied, onAc
 
 /** Turns the coach's proposed steps into the same shape as a suggested workout, so Home can show and chart it. */
 export function toWorkout(advice: Advice, ftp: number, sport: string, thresholdPace: number | null, paceUnit: string): Workout {
+  if (sport === "gym" && advice.adjusted_exercises?.length) {
+    return {
+      name: "Coach's version", purpose: advice.summary, note: "", minutes: gymMinutes(advice.adjusted_exercises),
+      rationale: advice.cautions, steps: [], exercises: advice.adjusted_exercises,
+    };
+  }
   const steps: WorkoutStep[] = (advice.adjusted_steps ?? []).map((s) => {
     const low = s.pct_ftp_low, high = s.pct_ftp_high;
     const step: WorkoutStep = {

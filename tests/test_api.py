@@ -64,7 +64,7 @@ def test_sync_then_read_back(client):
     assert "raw_json" not in detail and "user_email" not in detail
     assert client.get("/api/home").status_code == 200
     run = client.get("/api/home?sport=running").json()
-    assert run["sport"] == "running" and run["power_prs"] == [] and set(run["levels"]) == {"cycling", "running", "swimming"}
+    assert run["sport"] == "running" and run["power_prs"] == [] and set(run["levels"]) == {"cycling", "running", "swimming", "gym"}
     assert client.get("/api/home?sport=swimming").json()["pace_unit"] == "/100 m"
     assert client.get("/api/home?sport=curling").status_code == 400
 

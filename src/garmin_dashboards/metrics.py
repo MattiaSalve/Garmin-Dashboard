@@ -228,6 +228,7 @@ SPORT_GROUPS = {
     "Cycling": ("road_biking", "indoor_cycling", "cycling", "virtual_ride", "mountain_biking", "gravel_cycling"),
     "Running": ("running", "trail_running", "treadmill_running", "track_running"),
     "Swimming": ("lap_swimming", "open_water_swimming", "swimming"),
+    "Strength": ("strength_training",),
 }
 
 # Whitelisted sort orders for search_activities (never interpolate user input).
@@ -452,6 +453,28 @@ def avg_weekly_hours(group: str, today: date, weeks: int = 12, db_path: str | No
     """Average moving hours per week in a SPORT_GROUPS group over the last `weeks` weeks."""
     total = summary(today - timedelta(days=7 * weeks - 1), today, group, db_path)["total_moving_duration_h"]
     return total / weeks
+
+
+def strength_sessions(start: date, end: date, db_path: str | None = None) -> list[dict]:
+    """Strength activities in the range with the exercise sets Garmin recorded (empty when the watch didn't label them)."""
+    marks = ", ".join("?" * len(SPORT_GROUPS["Strength"]))
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT date(start_time_local) AS day, raw_json FROM activities "
+            f"WHERE date(start_time_local) BETWEEN ? AND ? AND sport_type IN ({marks}) ORDER BY start_time_local",
+            (start.isoformat(), end.isoformat(), *SPORT_GROUPS["Strength"]),
+        ).fetchall()
+    out = []
+    for r in rows:
+        try:
+            sets = json.loads(r["raw_json"] or "{}").get("summarizedExerciseSets") or []
+        except ValueError:
+            sets = []
+        out.append({"day": r["day"], "sets": [
+            {"category": s.get("category"), "sets": s.get("sets"), "reps": s.get("reps"), "max_weight_kg": (s.get("maxWeight") or 0) / 1000}
+            for s in sets if isinstance(s, dict)
+        ]})
+    return out
 
 
 def sport_evidence(group: str, today: date, db_path: str | None = None) -> dict:

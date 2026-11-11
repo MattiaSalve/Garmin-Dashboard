@@ -43,7 +43,7 @@ def test_search_filters_and_groups(tmp_path):
     assert ids(text="alp") == [1]
     assert ids(order="Longest distance") == [1, 2, 3]
     rng = (date(2026, 1, 1), date(2026, 1, 31))
-    assert metrics.distance_by_group(*rng, db_path=path) == {"Cycling": 130.0, "Running": 10.0, "Swimming": 0.0}
+    assert metrics.distance_by_group(*rng, db_path=path) == {"Cycling": 130.0, "Running": 10.0, "Swimming": 0.0, "Strength": 0.0}
     assert metrics.latest_vo2max("Cycling", db_path=path) == {"value": 55, "day": "2026-01-01"}
     assert metrics.filter_bounds(db_path=path)["km"] == 100
 

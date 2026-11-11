@@ -4,7 +4,9 @@ import { Banner, Loading } from "../components";
 
 const LEVEL_OPTIONS = [["", "Estimate from my training and fitness"], ["1", "Beginner"], ["2", "Intermediate"], ["3", "Advanced"]];
 
-const FIELDS: { key: string; label: string; help?: string; step: number; levels?: boolean }[] = [
+const GYM_GOALS = [["", "General strength (default)"], ["2", "Support my endurance training"], ["3", "Build muscle"]];
+
+const FIELDS: { key: string; label: string; help?: string; step: number; levels?: boolean; options?: string[][] }[] = [
   { key: "ftp_w", label: "FTP (W)", help: "Used to turn workout targets into watts.", step: 1 },
   { key: "hrv_low", label: "HRV range low (ms)", help: "Leave empty to use Garmin's baseline.", step: 1 },
   { key: "hrv_high", label: "HRV range high (ms)", help: "Leave empty to use Garmin's baseline.", step: 1 },
@@ -13,6 +15,8 @@ const FIELDS: { key: string; label: string; help?: string; step: number; levels?
   { key: "level_cycling", label: "Cycling level", help: "Sets how hard and long suggested rides are.", step: 1, levels: true },
   { key: "level_running", label: "Running level", help: "Beginners get run/walk and fewer intervals.", step: 1, levels: true },
   { key: "level_swimming", label: "Swimming level", help: "Beginners get technique-focused sessions.", step: 1, levels: true },
+  { key: "level_gym", label: "Gym level", help: "Beginners get fewer sets and shorter sessions.", step: 1, levels: true },
+  { key: "gym_goal", label: "Gym focus", help: "Picks the rep ranges and favours legs and core if the gym supports your cycling, running or swimming.", step: 1, options: GYM_GOALS },
   { key: "run_threshold_pace_s", label: "Running threshold pace (sec/km)", help: "Pace you could hold for about an hour, e.g. 300 = 5:00/km. Turns running steps into target paces.", step: 5 },
   { key: "swim_threshold_pace_s", label: "Swimming threshold pace (sec/100 m)", help: "Pace you could hold for about 20 minutes of continuous swimming, e.g. 110 = 1:50/100 m.", step: 1 },
 ];
@@ -47,9 +51,9 @@ export function SettingsCard() {
             {FIELDS.map((f) => (
               <label className="field" key={f.key} title={f.help}>
                 {f.label}
-                {f.levels ? (
+                {f.levels || f.options ? (
                   <select value={values[f.key] ?? ""} onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}>
-                    {LEVEL_OPTIONS.map(([v, text]) => <option key={v} value={v}>{text}</option>)}
+                    {(f.options ?? LEVEL_OPTIONS).map(([v, text]) => <option key={v} value={v}>{text}</option>)}
                   </select>
                 ) : (
                   <input type="number" min={0} step={f.step} placeholder="Not set" value={values[f.key] ?? ""}

@@ -150,6 +150,8 @@ SETTING_DEFAULTS: dict[str, float | None] = {
     "level_cycling": None,   # 1 beginner, 2 intermediate, 3 advanced; None = estimate from recent hours
     "level_running": None,
     "level_swimming": None,
+    "level_gym": None,
+    "gym_goal": None,  # 1 general strength, 2 support endurance training, 3 build muscle; None = general strength
     "run_threshold_pace_s": None,  # seconds per km you can hold for about an hour; None = effort-only targets
     "swim_threshold_pace_s": None,  # seconds per 100 m you could hold for ~20 min of continuous swimming
 }

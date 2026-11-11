@@ -6,11 +6,12 @@ import { ActivityRow, Banner, ChartTooltip, Loading, Metric } from "../component
 import { query, useFetch } from "../api";
 import { ZONE_COLORS, daysAgo, fmt, fmtDuration } from "../lib";
 import { SPORTS, TIME_OPTIONS, useWorkout, type Sport } from "../workout";
+import { GymExercise, GymInfo, GymSession, MuscleStrip } from "./GymSession";
 import { WorkoutChart, WorkoutStep, stepTarget } from "./WorkoutChart";
 
 const HRV = "#1e88e5";
-const SPORT_LABEL: Record<Sport, string> = { cycling: "Cycling", running: "Running", swimming: "Swimming" };
-const LONGEST: Record<Sport, string> = { cycling: "ride", running: "run", swimming: "swim" };
+const SPORT_LABEL: Record<Sport, string> = { cycling: "Cycling", running: "Running", swimming: "Swimming", gym: "Gym" };
+const LONGEST: Record<Sport, string> = { cycling: "ride", running: "run", swimming: "swim", gym: "session" };
 interface Level { level: string; source: "set" | "estimated"; reasons: string[] }
 
 interface Wellness {
@@ -23,18 +24,20 @@ export interface HomeData {
   today: string; has_wellness: boolean; sport: Sport; levels: Record<Sport, Level>; threshold_pace_s: number | null; pace_unit: string;
   readiness: { level: "green" | "amber" | "red"; score: number; headline: string; signals: Signal[]; hrv_range: [number, number] | null };
   today_row: Wellness | null; form: number | null; ftp: number;
-  workout: { name: string; purpose: string; note: string; minutes: number; rationale: string[]; steps: WorkoutStep[] };
+  workout: { name: string; purpose: string; note: string; minutes: number; rationale: string[]; steps: WorkoutStep[]; exercises?: GymExercise[] };
+  gym: GymInfo | null;
   wellness: Wellness[]; intensity: { day: string; load: number }[];
   week: { week_start: string; hours: number; distance_km: number; load: number; activity_count: number; avg_hours: number; avg_load: number; easy_h: number; moderate_h: number; hard_h: number };
   week_activities: ActivityRow[]; ramp: number | null; ramp_warning: number;
   settings: Record<string, number | null>;
   power_prs: { seconds: number; watts: number; previous_watts: number | null }[];
-  year: { year: number; km: number; goal: number | null; days_elapsed: number; days_in_year: number; longest: { activity_name: string; day: string; distance_m: number } | null };
+  year: { year: number; km: number; goal: number | null; days_elapsed: number; days_in_year: number; sessions: number; longest: { activity_name: string; day: string; distance_m: number } | null };
   ftp_trend: { month: string; ftp_estimate: number }[];
 }
 
 export function useHomeData(minutes: number, sport: Sport) {
-  return useFetch<HomeData>(`/home${query({ minutes, sport })}`);
+  const { gymFocus } = useWorkout();
+  return useFetch<HomeData>(`/home${query({ minutes, sport, focus: sport === "gym" && gymFocus !== "auto" ? gymFocus : null })}`);
 }
 
 const signed = (v: number, digits = 0) => `${v >= 0 ? "+" : ""}${v.toFixed(digits)}`;
@@ -57,7 +60,7 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
 }) {
   const options = TIME_OPTIONS[sport];
   const level = d.levels[sport];
-  const { override, clearOverride } = useWorkout();
+  const { override, clearOverride, gymFocus, setGymFocus } = useWorkout();
   const w = override ?? d.workout;
   const r = d.readiness;
   const t = d.today_row;
@@ -85,7 +88,7 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
         <p className="muted">Each caution costs 15 points and each bad signal 35. 75+ is green, 45–74 amber, below 45 red. Set your own HRV range in Settings.</p>
       </details>
 
-      <h3>{override ? "Coach's workout" : w.steps.length ? "Suggested workout" : "Suggestion"} · {w.name}</h3>
+      <h3>{override ? "Coach's workout" : w.steps.length || w.exercises?.length ? "Suggested workout" : "Suggestion"} · {w.name}</h3>
       {override ? <p><Banner kind="info">You accepted this workout from the coach. <button className="secondary" onClick={clearOverride}>Back to suggested workout</button></Banner></p> : null}
       <div className="row">
         <label className="field">Sport today
@@ -93,6 +96,14 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
             {SPORTS.map((x) => <option key={x} value={x}>{SPORT_LABEL[x]}</option>)}
           </select>
         </label>
+        {sport === "gym" ? (
+          <label className="field">What to train
+            <select value={gymFocus} onChange={(e) => setGymFocus(e.target.value)}>
+              <option value="auto">Let the app choose (recommended)</option>
+              {Object.entries(d.gym?.focus_options ?? {}).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+          </label>
+        ) : null}
       </div>
       <details>
         <summary>Level: {level.level} {sport} ({level.source === "set" ? "set in Settings" : "estimated"})</summary>
@@ -105,8 +116,10 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
         <input type="range" min={0} max={options.length - 1} value={Math.max(options.indexOf(minutes), 0)}
           onChange={(e) => setMinutes(options[Number(e.target.value)])} />
       </label>
-      <p className="muted">{w.purpose}{w.steps.length ? ` · ${w.minutes} min` : ""}</p>
+      <p className="muted">{w.purpose}{w.steps.length || w.exercises?.length ? ` · about ${w.minutes} min` : ""}</p>
       {w.rationale[0] ? <p className="muted">{w.rationale[0]}</p> : null}
+      {sport === "gym" && d.gym ? <MuscleStrip gym={d.gym} /> : null}
+      {w.exercises?.length ? <GymSession exercises={w.exercises} /> : null}
       {w.steps.length ? <WorkoutChart steps={w.steps} ftp={d.ftp} sport={sport} /> : null}
       {sport !== "cycling" && !d.threshold_pace_s && w.steps.length
         ? <p className="muted">Add your threshold pace in Settings to see target paces; until then steps show effort on a 1–10 scale.</p> : null}
@@ -177,7 +190,7 @@ export function Week({ d }: { d: HomeData }) {
       <h2>This week · {d.sport} since {start}</h2>
       <div className="grid">
         <Metric label="Hours" value={w.hours.toFixed(1)} sub={`${signed(w.hours - w.avg_hours, 1)} vs 4-wk avg`} />
-        <Metric label="Distance" value={`${fmt(w.distance_km)} km`} />
+        {d.sport === "gym" ? null : <Metric label="Distance" value={`${fmt(w.distance_km)} km`} />}
         <Metric label="Load" value={fmt(w.load)} sub={`${signed(w.load - w.avg_load)} vs 4-wk avg`} />
         <Metric label="Activities" value={w.activity_count} />
       </div>
@@ -217,7 +230,7 @@ export function Records({ d }: { d: HomeData }) {
       ) : <p className="muted">No new power bests in the last 4 weeks.</p>}
       <div className="grid" style={{ marginTop: 12 }}>
         <div>
-          <Metric label={`${SPORT_LABEL[d.sport]} ${y.year}`} value={`${fmt(y.km)} km`} sub={expected !== null && d.sport === "cycling" ? `${signed(y.km - expected)} km vs pace` : d.sport === "cycling" ? "Set a yearly goal in Settings." : null} />
+          <Metric label={`${SPORT_LABEL[d.sport]} ${y.year}`} value={d.sport === "gym" ? `${y.sessions} sessions` : `${fmt(y.km)} km`} sub={expected !== null && d.sport === "cycling" ? `${signed(y.km - expected)} km vs pace` : d.sport === "cycling" ? "Set a yearly goal in Settings." : null} />
           {y.goal && d.sport === "cycling" ? <><progress max={1} value={Math.min(y.km / y.goal, 1)} /><span className="muted">{((y.km / y.goal) * 100).toFixed(0)}% of {fmt(y.goal)} km</span></> : null}
         </div>
         {y.longest?.distance_m ? <Metric label={`Longest ${LONGEST[d.sport]} this year`} value={`${fmt(y.longest.distance_m / 1000)} km`} sub={`${y.longest.activity_name} · ${y.longest.day}`} /> : null}

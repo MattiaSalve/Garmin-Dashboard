@@ -25,4 +25,14 @@ describe("toWorkout", () => {
     const w = toWorkout(advice, 250, "running", 300, "min/km");
     expect(w.steps[1].pace_fast).toBe("6:57");
   });
+  it("keeps a gym proposal as exercises with an estimated length", () => {
+    const gym = {
+      ...advice, adjusted_steps: null,
+      adjusted_exercises: [{ name: "Split squat", group: "legs", sets: 3, reps: "6–8", rpe: 7, rest_s: 90 }],
+    };
+    const w = toWorkout(gym, 250, "gym", null, "");
+    expect(w.steps).toEqual([]);
+    expect(w.exercises?.[0].name).toBe("Split squat");
+    expect(w.minutes).toBe(Math.round(6 + (3 * 135) / 60 + 1));
+  });
 });

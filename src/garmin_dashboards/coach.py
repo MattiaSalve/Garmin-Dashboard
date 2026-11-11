@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from garmin_dashboards.mode import is_local
 from garmin_dashboards.readiness import Readiness
+from garmin_dashboards.gym import GymSuggestion
 from garmin_dashboards.workouts import Suggestion
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -57,6 +58,12 @@ for today in "sport_today".
 - Do not make medical claims or diagnoses. If something looks unusual (e.g. a sharp resting HR jump),
   suggest the athlete pays attention to how they feel and seeks professional advice if it persists.
 - Be brief: the summary is 2-4 sentences.
+- Gym sessions: when "sport_today" is "gym" the suggested workout lists exercises (sets, reps, rpe 1-10, rest in
+  seconds, muscle group). "gym.days_since_trained" says how many days ago each muscle group was last trained
+  (null = nothing in the recent data) and "gym.goal_label" is why the athlete lifts: for "Support my endurance
+  training" protect their rides and runs (no heavy leg work within 48 h of hard training or before a key session,
+  stop sets short of failure, favour legs, hips and core). Propose changes with the complete list in
+  adjusted_exercises and leave adjusted_steps null. In every other sport leave adjusted_exercises null.
 - The athlete may follow up with a message, e.g. to change the plan (shorter, different focus, a hill
   they have to ride). Answer it directly, keep the earlier context, and when the workout changes return
   the complete updated adjusted_steps (not just the changed part). The athlete's request overrides
@@ -70,11 +77,22 @@ class CoachStep(BaseModel):
     label: str
 
 
+class CoachExercise(BaseModel):
+    name: str
+    group: Literal["legs", "push", "pull", "core", "mobility"] = "legs"
+    sets: int
+    reps: str
+    rpe: int = Field(ge=1, le=10)
+    rest_s: int = 60
+    note: str = ""
+
+
 class CoachAdvice(BaseModel):
     summary: str
     agree_with_suggestion: bool
     adjusted_steps: list[CoachStep] | None
     cautions: list[str]
+    adjusted_exercises: list[CoachExercise] | None = None  # gym sessions only
 
 
 class ChatMessage(BaseModel):
@@ -101,7 +119,7 @@ def is_available(api_key: str | None = None) -> bool:
 
 def build_payload(
     readiness: Readiness,
-    suggestion: Suggestion,
+    suggestion: Suggestion | GymSuggestion,
     wellness: list[dict],
     intensity: list[dict],
     form: float | None,
@@ -112,6 +130,7 @@ def build_payload(
     levels: dict | None = None,
     threshold_pace_s: float | None = None,
     pace_unit: str = "",
+    gym: dict | None = None,
 ) -> dict:
     """Compact, identifier-free summary of the last 7 days plus today's verdict."""
     keep = ("day", "hrv_avg", "rhr", "sleep_score", "sleep_s", "bb_high")
@@ -139,14 +158,19 @@ def build_payload(
             "score": readiness.score,
             "signals": [{"name": s.name, "status": s.status, "value": s.value} for s in readiness.signals],
         },
-        "suggested_workout": {
-            "name": suggestion.workout.name,
-            "steps": [
-                {"minutes": s.seconds / 60, "pct_ftp_low": round(s.low * 100), "pct_ftp_high": round(s.high * 100),
-                 "label": s.label}
-                for s in suggestion.steps
-            ],
-        },
+        "suggested_workout": (
+            {"name": suggestion.workout.name, "exercises": suggestion.exercises}
+            if isinstance(suggestion, GymSuggestion) else
+            {
+                "name": suggestion.workout.name,
+                "steps": [
+                    {"minutes": s.seconds / 60, "pct_ftp_low": round(s.low * 100), "pct_ftp_high": round(s.high * 100),
+                     "label": s.label}
+                    for s in suggestion.steps
+                ],
+            }
+        ),
+        **({"gym": {"goal_label": gym["goal_label"], "days_since_trained": gym["days_since"]}} if gym else {}),
     }
 
 
