@@ -126,3 +126,17 @@ def test_workout_sport_is_normalised_and_optional():
     assert ask({"workout_sport": "Bodyweight session"}).workout_sport == "gym"
     assert ask({"workout_sport": "running"}).workout_sport == "running"
     assert ask({"workout_sport": "yoga"}).workout_sport is None
+
+
+def test_loose_cycling_steps_and_clear_errors():
+    steps = '{"summary": "s", "agree_with_suggestion": true, "adjusted_steps": [{"minutes": "10", "pct_ftp_low": 55.0, "pct_ftp_high": "72.5%", "label": null}], "cautions": null}'
+    advice = coach.ask_coach(payload(), post=lambda b, k: reply(steps), api_key="k")  # cautions: null is fine
+    assert advice.cautions == []
+    step = advice.adjusted_steps[0]
+    assert (step.minutes, step.pct_ftp_low, step.pct_ftp_high, step.label) == (10.0, 55, 72, "Step")
+    with pytest.raises(coach.CoachError, match="summary"):  # names the field that failed
+        coach.ask_coach(payload(), post=lambda b, k: reply('{"agree_with_suggestion": true}'), api_key="k")
+    with pytest.raises(coach.CoachError, match="cut off"):
+        coach.ask_coach(payload(), post=lambda b, k: reply('{"summary": "s", "agr', "length"), api_key="k")
+    with pytest.raises(coach.CoachError, match="empty reply"):
+        coach.ask_coach(payload(), post=lambda b, k: reply("   "), api_key="k")

@@ -5,6 +5,7 @@ The rules engine stays the source of truth; the LLM explains it and may propose 
 """
 
 import json
+import logging
 import os
 import urllib.error
 import urllib.request
@@ -18,6 +19,8 @@ from garmin_dashboards.mode import is_local
 from garmin_dashboards.readiness import Readiness
 from garmin_dashboards.gym import GymSuggestion
 from garmin_dashboards.workouts import Suggestion
+
+log = logging.getLogger(__name__)
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
 # Models offered in the menu (OpenRouter ids; the UI also accepts any other id). Edit freely.
@@ -82,7 +85,22 @@ class CoachStep(BaseModel):
     minutes: float
     pct_ftp_low: int
     pct_ftp_high: int
-    label: str
+    label: str = "Step"
+
+    @field_validator("minutes", mode="before")
+    @classmethod
+    def _minutes(cls, v):
+        return float(_first_number(v, 1))
+
+    @field_validator("pct_ftp_low", "pct_ftp_high", mode="before")
+    @classmethod
+    def _pct(cls, v):  # 72.5 or "72%" are fine; the UI shows whole percentages
+        return _first_number(v, 0)
+
+    @field_validator("label", mode="before")
+    @classmethod
+    def _label(cls, v):
+        return "Step" if v is None else str(v)
 
 
 def _first_number(value, default: int) -> int:
@@ -162,6 +180,11 @@ class CoachAdvice(BaseModel):
     adjusted_steps: list[CoachStep] | None = None
     cautions: list[str] = Field(default_factory=list)
     adjusted_exercises: list[CoachExercise] | None = None  # gym sessions only
+
+    @field_validator("cautions", mode="before")
+    @classmethod
+    def _cautions(cls, v):  # null or a single sentence instead of a list
+        return [] if v is None else [v] if isinstance(v, str) else v
 
     @field_validator("workout_sport", mode="before")
     @classmethod
@@ -286,7 +309,7 @@ def ask_coach(
         opening += "\n\nThe athlete's message: " + turns.pop(0)["content"]
     body = {
         "model": model or DEFAULT_MODEL,
-        "max_tokens": 2000,
+        "max_tokens": 4000,  # some models spend part of this on reasoning before the JSON
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": f"{SYSTEM}\n\nReply with a single JSON object matching this schema:\n{schema}"},
@@ -298,7 +321,13 @@ def ask_coach(
     choice = (data.get("choices") or [{}])[0]
     if choice.get("finish_reason") == "content_filter":
         raise CoachError("The coach declined to answer this request.")
-    text = (choice.get("message") or {}).get("content") or ""
+    content = (choice.get("message") or {}).get("content")
+    if isinstance(content, list):  # some providers return a list of parts
+        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    text = content or ""
+    if not text.strip():
+        raise CoachError("The coach sent an empty reply. Try again, or pick another model.")
+    truncated = choice.get("finish_reason") == "length"
     # Some models wrap the JSON in a code fence or add a sentence around it.
     start, end = text.find("{"), text.rfind("}")
     if 0 <= start < end:
@@ -306,4 +335,9 @@ def ask_coach(
     try:
         return CoachAdvice.model_validate_json(text)
     except ValidationError as exc:
-        raise CoachError("The coach returned an unexpected response.") from exc
+        log.warning("Unusable coach reply from %s (finish_reason=%s): %s | %.1500s", body["model"], choice.get("finish_reason"), exc, text)
+        if truncated:
+            raise CoachError("The coach's reply was cut off. Try again, or pick a model that writes longer replies.") from exc
+        first = exc.errors()[0] if exc.errors() else {}
+        where = ".".join(str(p) for p in first.get("loc", ())) or "reply"
+        raise CoachError(f"The coach returned an unexpected response ({where}: {first.get('msg', 'invalid')}). Try again or pick another model.") from exc
