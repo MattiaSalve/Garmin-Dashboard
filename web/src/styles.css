@@ -83,4 +83,24 @@ details summary { cursor: pointer; color: var(--muted); }
 @media (prefers-reduced-motion: reduce) { .coach-panel, .coach-fab { transition: none; } }
 .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.85rem; color: var(--muted); margin-top: 6px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
-@media (max-width: 600px) { .app { padding: 10px; } .card { padding: 12px; } }
+.app { padding-bottom: 88px; } /* room for the floating coach button */
+.coach-panel, .coach-body { overscroll-behavior: contain; }
+details table { display: block; overflow-x: auto; }
+@media (max-width: 600px) {
+  .app { padding: 10px 10px 88px; }
+  .card { padding: 12px; }
+  .nav { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; }
+  .nav a { white-space: nowrap; }
+  .who { flex-wrap: wrap; }
+  .coach-fab { right: 14px; bottom: calc(14px + env(safe-area-inset-bottom)); }
+  /* The coach becomes a full-screen sheet that follows the visible area, so the on-screen keyboard never covers it. */
+  .coach-panel {
+    top: var(--coach-top, 0px); left: 0; right: 0; bottom: auto; width: 100%; max-width: none; margin: 0;
+    height: var(--coach-vh, 100dvh); max-height: none; border-radius: 0; border-width: 0;
+    transform-origin: bottom center; transform: translateY(24px);
+  }
+  .coach-panel.open { transform: none; }
+  .coach-head { padding-top: calc(12px + env(safe-area-inset-top)); }
+  .coach-composer { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+}
+body.coach-open { overflow: hidden; } /* the page behind doesn't scroll while the chat is open */

@@ -97,7 +97,11 @@ export function Coach({ ftp, thresholdPace, paceUnit }: { ftp: number; threshold
   return (
     <div className="coach">
       <div className="coach-body" ref={body}>
-        <details open={needsKey}>
+        <details open={needsKey} onFocus={(e) => {
+          // Once the keyboard is up, bring the field being edited into view.
+          const field = e.target as HTMLElement;
+          setTimeout(() => field.scrollIntoView({ block: "center", behavior: "smooth" }), 300);
+        }}>
           <summary>Coach settings (API key, model, goals)</summary>
           <div className="row" style={{ margin: "12px 0" }}>
             <label className="field">OpenRouter API key

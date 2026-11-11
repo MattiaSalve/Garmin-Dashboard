@@ -91,6 +91,29 @@ function CoachWidget() {
   const [opened, setOpened] = useState(false);
   const { sport, minutes } = useWorkout();
   const home = useHomeData(minutes, sport);
+  // While the chat is open: stop the page behind from scrolling, and keep the chat inside the visible area
+  // (the on-screen keyboard shrinks the visual viewport but not the layout viewport on most phones).
+  useEffect(() => {
+    if (!open) return;
+    document.body.classList.add("coach-open");
+    const vv = window.visualViewport;
+    const root = document.documentElement;
+    const fit = () => {
+      if (!vv) return;
+      root.style.setProperty("--coach-vh", `${vv.height}px`);
+      root.style.setProperty("--coach-top", `${vv.offsetTop}px`);
+    };
+    fit();
+    vv?.addEventListener("resize", fit);
+    vv?.addEventListener("scroll", fit);
+    return () => {
+      document.body.classList.remove("coach-open");
+      vv?.removeEventListener("resize", fit);
+      vv?.removeEventListener("scroll", fit);
+      root.style.removeProperty("--coach-vh");
+      root.style.removeProperty("--coach-top");
+    };
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
