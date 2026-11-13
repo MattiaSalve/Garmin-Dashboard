@@ -194,15 +194,15 @@ CYCLING = SportProfile(
 )
 RUNNING = SportProfile(
     "running", "Running", RUN_LIBRARY,
-    (Step(300, 0.55, 0.70, "Easy jog"), Step(180, 0.70, 0.80, "Steady jog")),
+    (Step(300, 0.55, 0.70, "Warm-up, easy jog"), Step(180, 0.70, 0.80, "Warm-up, steady jog")),
     Step(300, 0.55, 0.70, "Warm-up jog"), Step(300, 0.50, 0.65, "Cool-down jog or walk"),
     {"beginner": 40, "intermediate": 90, "advanced": 150}, 30, 35, 45, (1.5, 4.0), (30, 75), True,
     "/km", "run_threshold_pace_s",
 )
 SWIMMING = SportProfile(
     "swimming", "Swimming", SWIM_LIBRARY,
-    (Step(300, 0.65, 0.75, "Easy swim"), Step(180, 0.75, 0.85, "Drills and build")),
-    Step(240, 0.65, 0.75, "Easy swim"), Step(180, 0.60, 0.70, "Easy swim cool-down"),
+    (Step(300, 0.65, 0.75, "Warm-up, easy swim"), Step(180, 0.75, 0.85, "Warm-up, drills and build")),
+    Step(240, 0.65, 0.75, "Warm-up, easy swim"), Step(180, 0.60, 0.70, "Easy swim cool-down"),
     {"beginner": 30, "intermediate": 60, "advanced": 90}, 20, 30, 40, (1.0, 3.0), (30, 60), False,
     "/100 m", "swim_threshold_pace_s",
 )
@@ -258,7 +258,8 @@ def _pace(seconds_per_km: float) -> str:
 
 
 def _rpe(fraction: float) -> str:
-    """Rough 1-10 perceived effort for an intensity given as a fraction of threshold speed."""
+    """Rough 1-10 perceived effort for an intensity given as a fraction of threshold speed.
+    Keep in step with rpeFor in web/src/lib.ts (used for coach workouts)."""
     for limit, label in ((0.5, "rest"), (0.72, "2–3"), (0.83, "3–4"), (0.95, "5–6"), (1.05, "7"), (1.15, "8")):
         if fraction <= limit:
             return label

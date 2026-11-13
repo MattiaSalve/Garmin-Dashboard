@@ -305,20 +305,6 @@ def distance_by_group(start: date, end: date, db_path: str | None = None) -> dic
     return {g: sum(by_type.get(s, 0) for s in sports) / 1000 for g, sports in SPORT_GROUPS.items()}
 
 
-def latest_vo2max(group: str, db_path: str | None = None) -> dict | None:
-    """Most recent VO2max reading for a sport group, or None."""
-    sports = SPORT_GROUPS[group]
-    marks = ", ".join("?" * len(sports))
-    with _connect(db_path) as conn:
-        row = conn.execute(
-            f"SELECT vo2max, date(start_time_local) AS day FROM activities "
-            f"WHERE vo2max IS NOT NULL AND sport_type IN ({marks}) "
-            f"ORDER BY start_time_local DESC LIMIT 1",
-            sports,
-        ).fetchone()
-    return {"value": row["vo2max"], "day": row["day"]} if row else None
-
-
 def filter_bounds(db_path: str | None = None) -> dict:
     """Largest distance (km), elevation gain (m) and moving time (h), for filter sliders."""
     with _connect(db_path) as conn:
@@ -337,7 +323,7 @@ def filter_bounds(db_path: str | None = None) -> dict:
 WELLNESS_COLUMNS = [
     "day", "hrv_avg", "hrv_weekly_avg", "hrv_baseline_low", "hrv_baseline_high", "hrv_status",
     "rhr", "sleep_score", "sleep_s", "deep_s", "rem_s", "bb_charged", "bb_high", "bb_low",
-    "stress_avg", "training_readiness",
+    "training_readiness",
 ]
 
 
@@ -373,6 +359,26 @@ def daily_intensity(start: date, end: date, db_path: str | None = None) -> list[
             ORDER BY day
             """,
             params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def activity_loads(start: date, end: date, db_path: str | None = None) -> list[dict]:
+    """One row per activity: day, Garmin sport key, moving minutes, training load and zone 4+5 minutes.
+    Feeds the training plan's load-per-hour calibration and its planned-vs-actual comparison."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT activity_id, date(start_time_local) AS day, activity_name, sport_type,
+                   COALESCE(moving_duration_s, duration_s, 0) / 60.0                          AS minutes,
+                   distance_m,
+                   training_load                                                              AS load,
+                   (COALESCE(hr_zone4_s, 0) + COALESCE(hr_zone5_s, 0)) / 60.0                 AS hard_min
+            FROM activities
+            {_FILTER}
+            ORDER BY start_time_local
+            """,
+            _params(start, end),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -413,6 +419,26 @@ def estimated_ftp_trend(db_path: str | None = None) -> list[dict]:
             """
         ).fetchall()
     return [{"month": r["month"], "ftp_estimate": r["best20"] * 0.95} for r in rows]
+
+
+FTP_FROM_20MIN = 0.95
+
+
+def ftp_estimate(today: date, days: int = 90, db_path: str | None = None) -> float | None:
+    """95% of the best 20-minute power from rides in the last `days`, or None without power data.
+    Rides only: running power from the watch is on a different scale and would inflate the estimate."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT MAX(json_extract(raw_json, '$.maxAvgPower_1200')) AS best20
+            FROM activities
+            WHERE raw_json IS NOT NULL AND date(start_time_local) BETWEEN :since AND :today
+              AND sport_type IN (SELECT value FROM json_each(:group))
+            """,
+            {"since": (today - timedelta(days=days - 1)).isoformat(), "today": today.isoformat(),
+             "group": json.dumps(SPORT_GROUPS["Cycling"])},
+        ).fetchone()
+    return row["best20"] * FTP_FROM_20MIN if row and row["best20"] else None
 
 
 def week_progress(today: date, db_path: str | None = None, sport: str | None = None) -> dict:

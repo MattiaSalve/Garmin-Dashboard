@@ -19,7 +19,7 @@ describe("toWorkout", () => {
   it("uses effort when no threshold pace is set for running", () => {
     const w = toWorkout(advice, 250, "running", null, "min/km");
     expect(w.steps[1].pace_fast).toBeUndefined();
-    expect(w.steps[1].rpe).toBe("7");
+    expect(w.steps[1].rpe).toBe("2–3"); // same scale as the suggested workouts (workouts._rpe)
   });
   it("turns running steps into paces from threshold pace", () => {
     const w = toWorkout(advice, 250, "running", 300, "min/km");

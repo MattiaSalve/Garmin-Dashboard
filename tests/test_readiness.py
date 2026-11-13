@@ -64,3 +64,35 @@ def test_hrv_range_falls_back_to_rolling_stats():
     low, high = hrv_range(rows, {})
     assert low < 105 < high
     assert hrv_range(rows[:5], {}) is None
+
+
+def test_missing_last_night_caps_at_amber_even_when_everything_else_is_fine():
+    rows = history(hrv_recent=110)[:-1]  # yesterday's data only: not synced yet today
+    r = assess(rows, EASY_WEEK, form=5, settings={}, today=TODAY)
+    assert r.score == 100 and r.level == "amber"
+    assert r.headline.startswith("No recovery data for last night")
+
+
+def test_missing_data_does_not_soften_a_red_day():
+    rows = history()[:-1]
+    hard = [{"day": (TODAY - timedelta(days=1)).isoformat(), "load": 300, "hard_min": 60}]
+    r = assess(rows, hard, form=-40, settings={}, today=TODAY)
+    # Form bad (35) + hard day (15) + HRV trend (15) = 35 points: red stays red.
+    assert r.level == "red" and "No recovery data" in r.headline
+
+
+def test_partial_data_is_not_capped():
+    rows = history(hrv_recent=110)
+    rows[-1] = {**rows[-1], "sleep_score": None}
+    r = assess(rows, EASY_WEEK, form=5, settings={}, today=TODAY)
+    assert r.level == "green"
+
+
+def test_garmin_low_hrv_status_drives_the_trend_signal():
+    rows = history(hrv_recent=100)  # in range every night, so our own count finds nothing
+    assert statuses(assess(rows, EASY_WEEK, form=0, settings={}, today=TODAY))["HRV trend"] == GOOD
+    rows[-1] = {**rows[-1], "hrv_status": "LOW"}
+    r = assess(rows, EASY_WEEK, form=0, settings={}, today=TODAY)
+    trend = next(s for s in r.signals if s.name == "HRV trend")
+    assert trend.status == CAUTION and "Garmin: low" in trend.value
+    assert sum(s.name == "HRV trend" for s in r.signals) == 1

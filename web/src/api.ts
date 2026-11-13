@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { daysAgo } from "./lib";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -9,7 +10,8 @@ export class ApiError extends Error {
 export async function api<T>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
   const response = await fetch(`/api${path}`, {
     method: options.method ?? (options.body !== undefined ? "POST" : "GET"),
-    headers: options.body !== undefined ? { "Content-Type": "application/json" } : undefined,
+    // The server works out "today" from the browser's date, so late-evening and early-morning visits match the athlete's day.
+    headers: { "X-Local-Date": daysAgo(0), ...(options.body !== undefined ? { "Content-Type": "application/json" } : {}) },
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     credentials: "same-origin",
   });
@@ -21,7 +23,7 @@ export async function api<T>(path: string, options: { method?: string; body?: un
     } catch {
       /* keep the generic message */
     }
-    if (response.status === 401 && path !== "/login" && path !== "/me") {
+    if (response.status === 401 && !path.startsWith("/login") && path !== "/me") {
       window.dispatchEvent(new Event("signed-out"));
     }
     throw new ApiError(response.status, detail);

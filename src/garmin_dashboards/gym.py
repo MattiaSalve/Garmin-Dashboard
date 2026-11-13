@@ -25,13 +25,15 @@ GROUP_LABEL = {"legs": "Legs", "push": "Push", "pull": "Pull", "core": "Core"}
 # Garmin's exercise categories (as in summarizedExerciseSets) mapped to the muscle groups they load.
 CATEGORY_GROUPS: dict[str, tuple[str, ...]] = {
     "SQUAT": ("legs",), "DEADLIFT": ("legs",), "LUNGE": ("legs",), "LEG_CURL": ("legs",), "CALF_RAISE": ("legs",),
-    "HIP_RAISE": ("legs",), "HIP_STABILITY": ("legs",), "HIP_SWING": ("legs",), "PLYO": ("legs",),
+    "HIP_RAISE": ("legs",), "HIP_SWING": ("legs",), "PLYO": ("legs",),
     "OLYMPIC_LIFT": ("legs", "pull"),
     "BENCH_PRESS": ("push",), "SHOULDER_PRESS": ("push",), "PUSH_UP": ("push",), "FLYE": ("push",),
     "LATERAL_RAISE": ("push",), "TRICEPS_EXTENSION": ("push",), "SHOULDER_STABILITY": ("push",),
     "ROW": ("pull",), "PULL_UP": ("pull",), "CURL": ("pull",), "SHRUG": ("pull",),
     "PLANK": ("core",), "CORE": ("core",), "CRUNCH": ("core",), "SIT_UP": ("core",), "LEG_RAISE": ("core",),
     "HYPEREXTENSION": ("core",), "CHOP": ("core",), "CARRY": ("core",),
+    # Low-load hip and trunk stability drills (Garmin files the dead bug here): core, so they never block leg day.
+    "HIP_STABILITY": ("core",),
     "TOTAL_BODY": GROUPS,
 }
 MIN_SETS = 2  # sets of a group in one session before it counts as trained (one set is often a warm-up)
@@ -277,6 +279,10 @@ def suggest(
         minutes = min(minutes, RED_CAP_MINUTES)
         session = MOBILITY
         return GymSuggestion(session, _fit(session, goal, level, minutes, False), why, _total(session, goal, level, minutes, False), level, goal, trained)
+
+    if focus == MOBILITY.key:
+        why.append("Mobility, as planned: easy movement to keep you supple without adding fatigue.")
+        return GymSuggestion(MOBILITY, _fit(MOBILITY, goal, level, minutes, False), why, _total(MOBILITY, goal, level, minutes, False), level, goal, trained)
 
     amber = readiness.level == "amber"
     since_hard = days_since_hard(intensity, today)

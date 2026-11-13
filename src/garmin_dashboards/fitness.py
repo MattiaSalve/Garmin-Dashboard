@@ -30,3 +30,9 @@ def fitness_series(daily_load: dict[date, float], end: date | None = None) -> li
         out.append({"day": day, "load": load, "fitness": ctl, "fatigue": atl, "form": tsb})
         day += timedelta(days=1)
     return out
+
+
+def form_today(series: list[dict]) -> float | None:
+    """Form at the start of the series' last day. Each row's form is computed before that day's load is
+    added, so the last row already reflects everything up to yesterday and nothing done today."""
+    return series[-1]["form"] if series else None

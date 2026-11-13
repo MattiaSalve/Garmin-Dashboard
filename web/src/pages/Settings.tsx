@@ -19,6 +19,7 @@ const FIELDS: { key: string; label: string; help?: string; step: number; levels?
   { key: "gym_goal", label: "Gym focus", help: "Picks the rep ranges and favours legs and core if the gym supports your cycling, running or swimming.", step: 1, options: GYM_GOALS },
   { key: "run_threshold_pace_s", label: "Running threshold pace (sec/km)", help: "Pace you could hold for about an hour, e.g. 300 = 5:00/km. Turns running steps into target paces.", step: 5 },
   { key: "swim_threshold_pace_s", label: "Swimming threshold pace (sec/100 m)", help: "Pace you could hold for about 20 minutes of continuous swimming, e.g. 110 = 1:50/100 m.", step: 1 },
+  { key: "pool_length_m", label: "Pool length (m)", help: "Swim workouts sent to the watch count lengths of this pool.", step: 1 },
 ];
 
 export function SettingsCard() {
@@ -67,6 +68,46 @@ export function SettingsCard() {
           {status ? <Banner kind={status.kind}>{status.text}</Banner> : null}
         </form>
       ) : null}
+      <DeleteAccount />
     </div>
+  );
+}
+
+/** Removes this app's copy of the user's data (not Garmin's) and signs out everywhere. */
+function DeleteAccount() {
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function remove() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api("/account", { method: "DELETE" });
+      localStorage.clear(); // includes the OpenRouter key and chat state kept in this browser
+      sessionStorage.clear();
+      window.dispatchEvent(new Event("signed-out"));
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <details style={{ marginTop: "1.5rem" }}>
+      <summary>Delete my data</summary>
+      <p className="muted">
+        Deletes everything this dashboard stores about you: synced activities and recovery data, settings, coach goals and
+        remembered sign-ins on every browser. Your Garmin Connect account and data are not touched; signing in again
+        downloads your history afresh.
+      </p>
+      <label className="field" style={{ maxWidth: 280 }}>Type <b>delete</b> to confirm
+        <input value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="off" />
+      </label>
+      <p><button className="danger" disabled={busy || confirm.trim().toLowerCase() !== "delete"} onClick={remove}>
+        {busy ? "Deleting…" : "Delete my data"}
+      </button></p>
+      {error ? <Banner kind="error">{error}</Banner> : null}
+    </details>
   );
 }

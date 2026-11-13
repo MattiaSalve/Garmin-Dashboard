@@ -37,6 +37,7 @@ h3 { margin: 16px 0 8px; font-size: 1rem; }
 button, select, input { font: inherit; color: inherit; }
 button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
 button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); }
+button.danger { background: var(--bad); color: #fff; }
 button:disabled { opacity: 0.5; cursor: default; }
 input, select { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; max-width: 100%; }
 label.field { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
@@ -104,3 +105,24 @@ details table { display: block; overflow-x: auto; }
   .coach-composer { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
 }
 body.coach-open { overflow: hidden; } /* the page behind doesn't scroll while the chat is open */
+/* Training plan */
+ul.plain { list-style: none; padding-left: 0; margin: 0 0 8px; }
+.goal-row { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.proposal { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.proposal:last-of-type { border-bottom: 0; }
+.proposal ul { margin: 4px 0 10px; }
+.plan-days { display: flex; flex-direction: column; }
+.plan-day { display: grid; grid-template-columns: 150px 1fr; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+.plan-day.today { background: var(--bg); margin: 0 -8px; padding: 10px 8px; border-radius: 8px; }
+.plan-day-head { display: flex; flex-direction: column; gap: 4px; }
+.plan-day-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.chip { font-size: 0.8rem; color: var(--muted); }
+button.session { background: transparent; color: var(--text); padding: 0; font-weight: 500; text-align: left; }
+button.session:disabled { opacity: 1; }
+button.session:not(:disabled):hover { color: var(--accent); }
+button.link { background: transparent; color: var(--accent); padding: 0; text-align: left; font-size: 0.9rem; align-self: start; }
+.editor { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 6px 0; }
+@media (max-width: 600px) {
+  .plan-day { grid-template-columns: 1fr; gap: 4px; }
+  .plan-day-head { flex-direction: row; justify-content: space-between; }
+}

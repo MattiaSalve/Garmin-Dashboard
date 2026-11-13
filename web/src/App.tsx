@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
+import { SyncProvider, useSync } from "./sync";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { api, ApiError } from "./api";
 import { Banner } from "./components";
 import { Coach } from "./pages/Coach";
 import { Activities, Find } from "./pages/Activities";
 import { Home, useHomeData } from "./pages/Home";
+import { Plan } from "./pages/Plan";
 import { Progress } from "./pages/Progress";
 import { Ride } from "./pages/Ride";
 import { SettingsCard } from "./pages/Settings";
@@ -19,6 +21,8 @@ function SignIn({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(true);
+  const [pending, setPending] = useState<string | null>(null); // set while Garmin waits for the emailed code
+  const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -27,55 +31,66 @@ function SignIn({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
     setBusy(true);
     setError(null);
     try {
-      onSignedIn(await api<Me>("/login", { body: { email, password, remember } }));
+      if (pending) {
+        onSignedIn(await api<Me>("/login/mfa", { body: { pending, code } }));
+        return;
+      }
+      const r = await api<Me | { mfa_required: true; pending: string }>("/login", { body: { email, password, remember } });
+      if ("mfa_required" in r) {
+        setPending(r.pending);
+        setPassword("");
+      } else onSignedIn(r);
     } catch (err) {
       setError((err as Error).message);
+      if (err instanceof ApiError && pending && err.message.includes("again")) restart(); // expired or out of tries
     } finally {
       setBusy(false);
     }
   }
 
+  function restart() {
+    setPending(null);
+    setCode("");
+  }
+
   return (
     <div className="signin card">
       <h2>Garmin dashboard</h2>
-      <p className="muted">Sign in with your Garmin Connect account. Your password is sent to Garmin only and is never stored.</p>
-      <form onSubmit={submit}>
-        <label className="field">Garmin email
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required />
-        </label>
-        <label className="field">Garmin password
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
-        </label>
-        <label><input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> Keep me signed in on this browser (30 days)</label>
-        {error ? <Banner kind="error">{error}</Banner> : null}
-        <button disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
-      </form>
+      {pending ? (
+        <form onSubmit={submit}>
+          <p className="muted">Garmin sent a security code to your email (or authenticator app). Enter it within 5 minutes.</p>
+          <label className="field">Security code
+            <input inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)}
+              pattern="[0-9 ]{4,12}" autoFocus required />
+          </label>
+          {error ? <Banner kind="error">{error}</Banner> : null}
+          <div className="row">
+            <button disabled={busy}>{busy ? "Checking…" : "Verify"}</button>
+            <button type="button" className="secondary" onClick={restart}>Back</button>
+          </div>
+        </form>
+      ) : (
+        <>
+          <p className="muted">Sign in with your Garmin Connect account. Your password is sent to Garmin only and is never stored.</p>
+          <form onSubmit={submit}>
+            <label className="field">Garmin email
+              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required />
+            </label>
+            <label className="field">Garmin password
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
+            </label>
+            <label><input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> Keep me signed in on this browser (30 days)</label>
+            {error ? <Banner kind="error">{error}</Banner> : null}
+            <button disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
+          </form>
+        </>
+      )}
     </div>
   );
 }
 
-function SyncButton({ onDone }: { onDone: () => void }) {
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<{ kind: "info" | "error"; text: string } | null>(null);
-
-  const run = useCallback(
-    async (full: boolean) => {
-      setBusy(true);
-      setMessage(null);
-      try {
-        const r = await api<{ new_activities: number; wellness_days: number; failed: string[] }>("/sync", { body: { full } });
-        const failed = r.failed.length ? ` Couldn't download: ${r.failed.join(", ")}.` : "";
-        setMessage({ kind: r.failed.length ? "error" : "info", text: `${r.new_activities} new activities, ${r.wellness_days} recovery days updated.${failed}` });
-        onDone();
-      } catch (err) {
-        setMessage({ kind: "error", text: (err as Error).message });
-      } finally {
-        setBusy(false);
-      }
-    },
-    [onDone],
-  );
-
+function SyncButton() {
+  const { busy, message, run } = useSync();
   return (
     <>
       <button className="secondary" disabled={busy} onClick={() => run(false)}>{busy ? "Syncing…" : "Sync from Garmin"}</button>
@@ -128,7 +143,7 @@ function CoachWidget() {
           <button className="coach-close" onClick={() => setOpen(false)} aria-label="Close coach" tabIndex={open ? 0 : -1}>×</button>
         </div>
         {opened ? (home.data
-          ? <Coach ftp={home.data.ftp} thresholdPace={home.data.threshold_pace_s} paceUnit={home.data.pace_unit} />
+          ? <Coach ftp={home.data.ftp} settings={home.data.settings} />
           : <p className="muted coach-body">Loading…</p>) : null}
       </aside>
       <button className={`coach-fab${open ? " hidden" : ""}`} onClick={() => { setOpen(true); setOpened(true); }}
@@ -142,6 +157,7 @@ function CoachWidget() {
 export default function App() {
   const [me, setMe] = useState<Me | null | undefined>(undefined); // undefined = still checking
   const [refresh, setRefresh] = useState(0);
+  const bump = useCallback(() => setRefresh((n) => n + 1), []);
 
   useEffect(() => {
     api<Me>("/me").then(setMe).catch((e: ApiError) => setMe(e.status === 401 ? null : null));
@@ -160,10 +176,12 @@ export default function App() {
 
   return (
     <WorkoutProvider email={me.email}>
+    <SyncProvider email={me.email} onDone={bump}>
     <div className="app">
       <div className="topbar">
         <nav className="nav">
           <NavLink to="/" end>Home</NavLink>
+          <NavLink to="/plan">Plan</NavLink>
           <NavLink to="/week">Week overview</NavLink>
           <NavLink to="/find">Find</NavLink>
           <NavLink to="/trends">Trends</NavLink>
@@ -171,13 +189,14 @@ export default function App() {
           <NavLink to="/settings">Settings</NavLink>
         </nav>
         <div className="who">
-          <SyncButton onDone={() => setRefresh((n) => n + 1)} />
+          <SyncButton />
           <span>{me.email}</span>
           <button className="secondary" onClick={signOut}>Sign out</button>
         </div>
       </div>
       <Routes key={refresh}>
         <Route path="/" element={<Home />} />
+        <Route path="/plan" element={<Plan />} />
         <Route path="/week" element={<Activities />} />
         <Route path="/activities" element={<Navigate to="/week" replace />} />
         <Route path="/find" element={<Find />} />
@@ -189,6 +208,7 @@ export default function App() {
       </Routes>
       <CoachWidget />
     </div>
+    </SyncProvider>
     </WorkoutProvider>
   );
 }

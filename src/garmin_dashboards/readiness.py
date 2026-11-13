@@ -1,12 +1,14 @@
 """Readiness rules: turn recovery data and recent training into a traffic-light verdict.
 
 Everything here is pure Python on plain dicts so it can be unit-tested without
-Streamlit or a database. Each signal is scored good / caution / bad; the overall
+the web app or a database. Each signal is scored good / caution / bad; the overall
 score starts at 100 and loses CAUTION_PENALTY or BAD_PENALTY per signal:
 
     score >= GREEN_MIN  -> green  (go hard if the plan says so)
     score >= AMBER_MIN  -> amber  (keep it aerobic)
     otherwise           -> red    (recover)
+
+With no HRV, resting HR or sleep for last night, green is capped at MISSING_DATA_LEVEL (amber).
 """
 
 from dataclasses import dataclass, field
@@ -23,6 +25,10 @@ RHR_CAUTION_BPM, RHR_BAD_BPM = 3, 6
 SLEEP_CAUTION_SCORE, SLEEP_BAD_SCORE, SLEEP_MIN_HOURS = 70, 55, 6
 FORM_CAUTION, FORM_BAD = -10, -25
 HARD_DAY_MINUTES, HARD_DAY_TE, HARD_DAY_LOAD = 10, 4.0, 150
+GARMIN_HRV_LOW = ("LOW", "POOR")  # Garmin's own HRV status values that mean "suppressed"
+# With no HRV, resting HR or sleep for last night the verdict can't be green: unknown recovery isn't good recovery.
+MISSING_DATA_LEVEL = "amber"
+RECOVERY_SIGNALS = ("HRV", "Resting HR", "Sleep")
 
 
 @dataclass
@@ -74,7 +80,14 @@ def _hrv_signals(wellness: list[dict], today_row: dict | None, rng) -> list[Sign
 
     nights = [r["hrv_avg"] for r in wellness[-HRV_TREND_NIGHTS:] if r.get("hrv_avg")]
     below = sum(v < low for v in nights)
-    if len(nights) >= HRV_TREND_BELOW:
+    garmin_status = (today_row or {}).get("hrv_status")
+    if garmin_status in GARMIN_HRV_LOW:
+        # Garmin compares the 7-day average with its baseline; trust it over our own count of low nights.
+        out.append(Signal(
+            "HRV trend", CAUTION, f"Garmin: {garmin_status.lower()} · {below}/{len(nights)} nights low",
+            "Garmin rates your 7-day HRV as low against your baseline.",
+        ))
+    elif len(nights) >= HRV_TREND_BELOW:
         status = CAUTION if below >= HRV_TREND_BELOW else GOOD
         out.append(Signal(
             "HRV trend", status, f"{below}/{len(nights)} nights low",
@@ -178,6 +191,10 @@ def assess(
         score -= {CAUTION: CAUTION_PENALTY, BAD: BAD_PENALTY}.get(s.status, 0)
     score = max(score, 0)
     level = "green" if score >= GREEN_MIN else "amber" if score >= AMBER_MIN else "red"
+    by_name = {s.name: s.status for s in signals}
+    missing = all(by_name.get(n) == NO_DATA for n in RECOVERY_SIGNALS)
+    if missing and level == "green":
+        level = MISSING_DATA_LEVEL
 
     flagged = [s.name for s in signals if s.status in (CAUTION, BAD)]
     headline = {
@@ -185,9 +202,11 @@ def assess(
         "amber": "Partly recovered — keep it aerobic today.",
         "red": "Under-recovered — rest or spin very easy.",
     }[level]
+    if missing and level != "red":
+        headline = "No recovery data for last night yet: keeping it aerobic."
     if flagged:
         headline += f" Watch: {', '.join(flagged)}."
-    if today_row is None:
-        headline += " (No recovery data synced for today yet.)"
+    if missing and level == "red":
+        headline += " (No recovery data for last night yet.)"
 
     return Readiness(level, score, signals, headline, rng, today_row is not None)

@@ -44,7 +44,6 @@ def test_search_filters_and_groups(tmp_path):
     assert ids(order="Longest distance") == [1, 2, 3]
     rng = (date(2026, 1, 1), date(2026, 1, 31))
     assert metrics.distance_by_group(*rng, db_path=path) == {"Cycling": 130.0, "Running": 10.0, "Swimming": 0.0, "Strength": 0.0}
-    assert metrics.latest_vo2max("Cycling", db_path=path) == {"value": 55, "day": "2026-01-01"}
     assert metrics.filter_bounds(db_path=path)["km"] == 100
 
 
@@ -96,3 +95,21 @@ def test_sport_evidence(tmp_path):
     db.save_activities([run(1, "2026-01-10", 47), run(2, "2025-12-20", 72), run(3, "2025-01-01", 150)], "me", path)
     e = metrics.sport_evidence("Running", date(2026, 1, 31), db_path=path)
     assert e["sessions_180d"] == 2 and e["longest_min_180d"] == 72 and round(e["weekly_hours"], 2) == 0.17
+
+
+def test_ftp_estimate_uses_recent_rides_only(tmp_path):
+    path = str(tmp_path / "t.db")
+    def act(i, day, p20, sport="road_biking"):
+        return {"activityId": i, "startTimeLocal": f"{day} 08:00:00", "activityType": {"typeKey": sport},
+                "maxAvgPower_1200": p20}
+    today = date(2026, 11, 13)
+    db.init_db(path)
+    assert metrics.ftp_estimate(today, db_path=path) is None
+    db.save_activities([
+        act(1, "2026-10-01", 280),
+        act(2, "2026-11-10", 270, "indoor_cycling"),
+        act(3, "2026-11-11", 400, "running"),  # running power: ignored
+        act(4, "2026-06-01", 350),  # too old
+        act(5, "2026-11-14", 390),  # after today
+    ], "me", path)
+    assert metrics.ftp_estimate(today, db_path=path) == 280 * 0.95

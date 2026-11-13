@@ -5,7 +5,6 @@ import json
 import os
 import shutil
 import sqlite3
-from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,7 +12,6 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("GARMIN_DASHBOARDS_DATA") or "data")
 LEGACY_DB = Path("garmin_data.db")  # the old single-user file, adopted by its owner on first sign-in
 
-_active_db: ContextVar[str | None] = ContextVar("active_db", default=None)
 
 
 def user_db_path(email: str) -> str:
@@ -30,13 +28,6 @@ def ensure_user_db(email: str) -> str:
     return str(path)
 
 
-def use_user(email: str) -> str:
-    """Make `email`'s database the default for this script run (call at the top of each run)."""
-    path = ensure_user_db(email)
-    _active_db.set(path)
-    return path
-
-
 def _legacy_belongs_to(email: str) -> bool:
     if not LEGACY_DB.exists():
         return False
@@ -48,14 +39,12 @@ def _legacy_belongs_to(email: str) -> bool:
     return owners == {email}
 
 
-def resolve(db_path: str | None = None) -> str:
-    """The explicit path if given, else the signed-in user's database."""
-    if db_path is not None:
-        return str(db_path)
-    active = _active_db.get()
-    if active is None:
-        raise RuntimeError("No user is signed in, so there is no database to use.")
-    return active
+def resolve(db_path: str | None) -> str:
+    """The database path as a string. Every caller passes the signed-in user's file explicitly (the API
+    keeps it on the session); None means a caller forgot, which must never fall back to someone's data."""
+    if db_path is None:
+        raise RuntimeError("No database given: pass the signed-in user's db_path.")
+    return str(db_path)
 
 # All units are metric (meters, seconds, m/s, meters above sea level, watts, bpm, kcal).
 SCHEMA = """
@@ -140,6 +129,36 @@ CREATE TABLE IF NOT EXISTS wellness (
 
 SETTINGS_SCHEMA = "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
 
+# The training plan: one row per planned session (a day can hold two, e.g. a ride and a gym session),
+# and the changes proposed by the rules or the coach, applied only when the athlete says so.
+PLAN_SCHEMA = """
+CREATE TABLE IF NOT EXISTS plan_days (
+    day          TEXT NOT NULL,
+    slot         INTEGER NOT NULL DEFAULT 0,
+    sport        TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    minutes      INTEGER NOT NULL,
+    planned_load REAL NOT NULL DEFAULT 0,
+    source       TEXT NOT NULL DEFAULT 'auto',
+    locked       INTEGER NOT NULL DEFAULT 0,
+    note         TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (day, slot)
+)
+"""
+PROPOSALS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS plan_proposals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    created      TEXT NOT NULL,
+    dedupe_key   TEXT NOT NULL UNIQUE,
+    kind         TEXT NOT NULL,
+    reason       TEXT NOT NULL,
+    changes_json TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'open',
+    source       TEXT NOT NULL DEFAULT 'rules'
+)
+"""
+PLAN_COLUMNS = ("day", "slot", "sport", "kind", "minutes", "planned_load", "source", "locked", "note")
+
 # Defaults for user settings (stored as text, converted on read).
 SETTING_DEFAULTS: dict[str, float | None] = {
     "ftp_w": 252.0,
@@ -154,7 +173,39 @@ SETTING_DEFAULTS: dict[str, float | None] = {
     "gym_goal": None,  # 1 general strength, 2 support endurance training, 3 build muscle; None = general strength
     "run_threshold_pace_s": None,  # seconds per km you can hold for about an hour; None = effort-only targets
     "swim_threshold_pace_s": None,  # seconds per 100 m you could hold for ~20 min of continuous swimming
+    "pool_length_m": 25.0,  # for swim workouts sent to the watch (distance steps count pool lengths)
 }
+
+# Sensible range (inclusive) for each setting; values outside are rejected by the API.
+SETTING_LIMITS: dict[str, tuple[float, float]] = {
+    "ftp_w": (50, 600),
+    "hrv_low": (10, 250),
+    "hrv_high": (10, 250),
+    "weekly_hours_target": (0, 40),
+    "yearly_km_goal": (0, 100_000),
+    "level_cycling": (1, 3),
+    "level_running": (1, 3),
+    "level_swimming": (1, 3),
+    "level_gym": (1, 3),
+    "gym_goal": (1, 3),
+    "run_threshold_pace_s": (120, 900),
+    "swim_threshold_pace_s": (50, 300),
+    "pool_length_m": (10, 100),
+}
+
+
+def settings_errors(new: dict[str, float | None], current: dict[str, float | None]) -> list[str]:
+    """Problems with a settings update (empty = fine). `current` is what is stored now."""
+    errors = [f"Unknown setting: {k}." for k in sorted(set(new) - set(SETTING_DEFAULTS))]
+    for key, value in new.items():
+        if key in SETTING_LIMITS and value is not None:
+            low, high = SETTING_LIMITS[key]
+            if not low <= value <= high:
+                errors.append(f"{key} must be between {low:g} and {high:g}.")
+    merged = {**current, **new}
+    if merged.get("hrv_low") is not None and merged.get("hrv_high") is not None and merged["hrv_low"] >= merged["hrv_high"]:
+        errors.append("The HRV range low value must be below the high value.")
+    return errors
 
 
 def to_row(a: dict, user_email: str, synced_at: str | None = None) -> dict:
@@ -213,6 +264,8 @@ def init_db(db_path: str | None = None) -> None:
         )
         conn.execute(WELLNESS_SCHEMA)
         conn.execute(SETTINGS_SCHEMA)
+        conn.execute(PLAN_SCHEMA)
+        conn.execute(PROPOSALS_SCHEMA)
 
 
 def save_wellness(days: dict[str, dict], db_path: str | None = None) -> None:
@@ -276,6 +329,20 @@ def set_text_setting(key: str, value: str, db_path: str | None = None) -> None:
         )
 
 
+def text_settings_with_prefix(prefix: str, db_path: str | None = None) -> dict[str, str]:
+    """Text settings whose key starts with `prefix`, keyed by the rest of the key."""
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        rows = conn.execute("SELECT key, value FROM settings WHERE substr(key, 1, ?) = ?", (len(prefix), prefix)).fetchall()
+    return {k[len(prefix):]: v for k, v in rows if v not in (None, "")}
+
+
+def delete_setting(key: str, db_path: str | None = None) -> None:
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+
+
 def all_settings(db_path: str | None = None) -> dict[str, float | None]:
     return {k: get_setting(k, db_path) for k in SETTING_DEFAULTS}
 
@@ -304,3 +371,100 @@ def save_activities(activities: list[dict], user_email: str, db_path: str | None
     init_db(db_path)
     with sqlite3.connect(resolve(db_path)) as conn:
         conn.executemany(sql, rows)
+
+
+# ------------------------------------------------------------------ training plan
+
+
+def _plan_row(r: sqlite3.Row) -> dict:
+    return {**dict(r), "locked": bool(r["locked"])}
+
+
+def get_plan_days(start: str, end: str, db_path: str | None = None) -> list[dict]:
+    """Planned sessions from `start` to `end` (ISO dates, inclusive), in day and slot order."""
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM plan_days WHERE day BETWEEN ? AND ? ORDER BY day, slot", (start, end)
+        ).fetchall()
+    return [_plan_row(r) for r in rows]
+
+
+def last_plan_day(db_path: str | None = None) -> str | None:
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        return conn.execute("SELECT MAX(day) FROM plan_days").fetchone()[0]
+
+
+def save_plan_days(rows: list[dict], db_path: str | None = None, replace_auto_from: str | None = None) -> None:
+    """Upsert planned sessions. With `replace_auto_from`, unlocked auto sessions from that day on are deleted
+    first (a regenerate), so only the athlete's own and applied changes survive."""
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        if replace_auto_from:
+            conn.execute("DELETE FROM plan_days WHERE day >= ? AND source = 'auto' AND locked = 0", (replace_auto_from,))
+        updates = ", ".join(f"{c} = excluded.{c}" for c in PLAN_COLUMNS if c not in ("day", "slot"))
+        conn.executemany(
+            f"INSERT INTO plan_days ({', '.join(PLAN_COLUMNS)}) VALUES ({', '.join(':' + c for c in PLAN_COLUMNS)}) "
+            f"ON CONFLICT(day, slot) DO UPDATE SET {updates}",
+            [{**{c: r.get(c) for c in PLAN_COLUMNS}, "locked": int(bool(r.get("locked")))} for r in rows],
+        )
+
+
+def delete_plan_day(day: str, slot: int, db_path: str | None = None) -> None:
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        conn.execute("DELETE FROM plan_days WHERE day = ? AND slot = ?", (day, slot))
+
+
+def clear_plan(db_path: str | None = None) -> None:
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        conn.execute("DELETE FROM plan_days")
+        conn.execute("DELETE FROM plan_proposals")
+
+
+def _proposal_row(r: sqlite3.Row) -> dict:
+    out = dict(r)
+    out["changes"] = json.loads(out.pop("changes_json"))
+    return out
+
+
+def add_proposal(key: str, kind: str, reason: str, changes: list[dict], source: str = "rules",
+                 db_path: str | None = None) -> int | None:
+    """Store a proposal; None when one with the same key was already made (open, applied or dismissed)."""
+    init_db(db_path)
+    created = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with sqlite3.connect(resolve(db_path)) as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO plan_proposals (created, dedupe_key, kind, reason, changes_json, source) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (created, key, kind, reason, json.dumps(changes), source),
+        )
+        return cur.lastrowid if cur.rowcount else None
+
+
+def get_proposals(status: str | None = "open", db_path: str | None = None) -> list[dict]:
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        sql, args = "SELECT * FROM plan_proposals", ()
+        if status:
+            sql, args = sql + " WHERE status = ?", (status,)
+        rows = conn.execute(sql + " ORDER BY id", args).fetchall()
+    return [_proposal_row(r) for r in rows]
+
+
+def get_proposal(pid: int, db_path: str | None = None) -> dict | None:
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM plan_proposals WHERE id = ?", (pid,)).fetchone()
+    return _proposal_row(row) if row else None
+
+
+def set_proposal_status(pid: int, status: str, db_path: str | None = None) -> None:
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        conn.execute("UPDATE plan_proposals SET status = ? WHERE id = ?", (status, pid))

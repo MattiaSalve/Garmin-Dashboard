@@ -2,10 +2,12 @@ import {
   Area, CartesianGrid, ComposedChart, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
 import { ActivityRow, Banner, ChartTooltip, Loading, Metric } from "../components";
-import { query, useFetch } from "../api";
-import { ZONE_COLORS, daysAgo, fmt, fmtDuration } from "../lib";
+import { api, query, useFetch } from "../api";
+import { ZONE_COLORS, daysAgo, fmt, fmtDuration, withOption } from "../lib";
 import { SPORTS, TIME_OPTIONS, useWorkout, type Sport } from "../workout";
+import { useSync } from "../sync";
 import { GymExercise, GymInfo, GymSession, MuscleStrip } from "./GymSession";
 import { WorkoutChart, WorkoutStep, stepTarget } from "./WorkoutChart";
 
@@ -22,7 +24,7 @@ interface Signal { name: string; status: string; value: string; explanation: str
 export interface HomeData {
   week_hours_all: number;
   today: string; has_wellness: boolean; sport: Sport; levels: Record<Sport, Level>; threshold_pace_s: number | null; pace_unit: string;
-  readiness: { level: "green" | "amber" | "red"; score: number; headline: string; signals: Signal[]; hrv_range: [number, number] | null };
+  readiness: { level: "green" | "amber" | "red"; score: number; headline: string; signals: Signal[]; hrv_range: [number, number] | null; has_today_data: boolean };
   today_row: Wellness | null; form: number | null; ftp: number;
   workout: { name: string; purpose: string; note: string; minutes: number; rationale: string[]; steps: WorkoutStep[]; exercises?: GymExercise[] };
   gym: GymInfo | null;
@@ -33,7 +35,19 @@ export interface HomeData {
   power_prs: { seconds: number; watts: number; previous_watts: number | null }[];
   year: { year: number; km: number; goal: number | null; days_elapsed: number; days_in_year: number; sessions: number; longest: { activity_name: string; day: string; distance_m: number } | null };
   ftp_trend: { month: string; ftp_estimate: number }[];
+  ftp_hint: { estimate: number; current: number } | null;
+  /** Today's session from the training plan, after today's readiness check (null without a plan). */
+  plan_today: PlanToday | null;
+  plan_proposals: number;
 }
+
+interface PlanSessionShort { sport: string; kind: string; minutes: number; label: string }
+export interface PlanToday {
+  planned: PlanSessionShort; sport: string; kind: string; minutes: number; changed: boolean; reason: string | null;
+  others: PlanSessionShort[]; used: boolean;
+}
+
+const planMinutes = (m: number) => Math.min(600, Math.max(20, m));
 
 export function useHomeData(minutes: number, sport: Sport) {
   const { gymFocus } = useWorkout();
@@ -43,24 +57,100 @@ export function useHomeData(minutes: number, sport: Sport) {
 const signed = (v: number, digits = 0) => `${v >= 0 ? "+" : ""}${v.toFixed(digits)}`;
 
 export function Home() {
-  const { minutes, setMinutes, sport, setSport } = useWorkout();
-  const { data, error, loading } = useHomeData(minutes, sport);
+  const { minutes, setMinutes, sport, setSport, override } = useWorkout();
+  const { data, error, loading, reload } = useHomeData(minutes, sport);
+
+  // Once a day, open Home on today's planned sport and length. After that the athlete's own choice sticks.
+  const plan = data?.plan_today;
+  useEffect(() => {
+    if (!data || !plan || plan.sport === "rest" || !SPORTS.includes(plan.sport as Sport)) return;
+    const key = `plan_applied:${data.today}`;
+    try {
+      if (sessionStorage.getItem(key)) return;
+      sessionStorage.setItem(key, "1");
+    } catch { return; }
+    if (override) return; // a coach workout accepted today wins
+    if (plan.sport !== sport) setSport(plan.sport as Sport);
+    if (plan.planned.minutes !== minutes) setMinutes(planMinutes(plan.planned.minutes));
+  }, [data, plan]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!data) return <Loading error={error} loading={loading} />;
   return (
     <>
+      {data.plan_proposals ? (
+        <p><Banner kind="info">
+          Your plan has {data.plan_proposals === 1 ? "a suggested change" : `${data.plan_proposals} suggested changes`}.{" "}
+          <Link to="/plan">Review on the Plan page →</Link>
+        </Banner></p>
+      ) : null}
+      {data.ftp_hint ? <FtpHint hint={data.ftp_hint} onUpdated={reload} /> : null}
       <Today d={data} minutes={minutes} setMinutes={setMinutes} sport={sport} setSport={setSport} />
       <RecoverySummary d={data} />
     </>
   );
 }
 
+/** Offer to raise FTP when recent 20-minute power is clearly above it. Dismissing hides this estimate only. */
+function FtpHint({ hint, onUpdated }: { hint: { estimate: number; current: number }; onUpdated: () => void }) {
+  const key = `ftp-hint-dismissed:${hint.estimate}`;
+  const [hidden, setHidden] = useState(() => localStorage.getItem(key) !== null);
+  const [error, setError] = useState<string | null>(null);
+  if (hidden) return null;
+  const update = async () => {
+    try {
+      await api("/settings", { method: "PUT", body: { ftp_w: hint.estimate } });
+      onUpdated();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+  return (
+    <p>
+      <Banner kind="info">
+        Your best 20-minute power in the last 90 days suggests an FTP of about {hint.estimate} W (set: {hint.current} W).{" "}
+        <button onClick={update}>Update FTP</button>{" "}
+        <button className="secondary" onClick={() => { localStorage.setItem(key, "1"); setHidden(true); }}>Dismiss</button>
+        {error ? <> · {error}</> : null}
+      </Banner>
+    </p>
+  );
+}
+
+/** Upload the workout to Garmin Connect, scheduled for today, so it appears on the watch after its next sync. */
+function SendToWatch({ name, sport, steps, exercises }: { name: string; sport: Sport; steps: WorkoutStep[]; exercises?: GymExercise[] }) {
+  const [state, setState] = useState<{ busy: boolean; ok?: string; error?: string }>({ busy: false });
+  const send = async () => {
+    setState({ busy: true });
+    try {
+      const r = await api<{ replaced: boolean }>("/workout/push", {
+        body: {
+          sport, name,
+          steps: steps.map(({ minutes, frac_low, frac_high, label }) => ({ minutes, frac_low, frac_high, label })),
+          exercises: (exercises ?? []).map(({ name, group, sets, reps, rpe, rest_s, note }) => ({ name, group, sets, reps, rpe, rest_s, note: note ?? "" })),
+        },
+      });
+      setState({ busy: false, ok: `${r.replaced ? "Replaced today's earlier copy. " : ""}Scheduled for today in Garmin Connect: sync your watch to get it.` });
+    } catch (err) {
+      setState({ busy: false, error: (err as Error).message });
+    }
+  };
+  return (
+    <p className="row">
+      <button className="secondary" disabled={state.busy} onClick={send}>{state.busy ? "Sending…" : "Send to watch"}</button>
+      {state.ok ? <span className="muted">{state.ok}</span> : null}
+      {state.error ? <span style={{ color: "var(--bad)" }}>{state.error}</span> : null}
+    </p>
+  );
+}
+
 function Today({ d, minutes, setMinutes, sport, setSport }: {
   d: HomeData; minutes: number; setMinutes: (m: number) => void; sport: Sport; setSport: (s: Sport) => void;
 }) {
-  const options = TIME_OPTIONS[sport];
+  const p = d.plan_today;
+  const options = withOption(TIME_OPTIONS[sport], p && p.planned.sport === sport ? planMinutes(p.planned.minutes) : null);
   const level = d.levels[sport];
   const { override, clearOverride, gymFocus, setGymFocus } = useWorkout();
+  const sync = useSync();
   const w = override ?? d.workout;
   const r = d.readiness;
   const t = d.today_row;
@@ -68,7 +158,13 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
   return (
     <section className="card">
       <h2>Today · {date}</h2>
-      {!d.has_wellness ? <Banner kind="info">No recovery data yet. Press “Sync from Garmin” to download HRV, sleep and resting HR.</Banner> : null}
+      {!d.has_wellness ? <Banner kind="info">No recovery data yet. Press “Sync from Garmin” to download HRV, sleep and resting HR.</Banner>
+        : !r.has_today_data ? (
+          <Banner kind="info">
+            Last night's recovery isn't synced yet. Open Garmin Connect on your phone so the watch uploads, then{" "}
+            <button className="secondary" disabled={sync.busy} onClick={() => sync.run()}>{sync.busy ? "Syncing…" : "Sync now"}</button>
+          </Banner>
+        ) : null}
       <p><Banner kind={r.level}>Readiness {r.score}/100 · {r.headline}</Banner></p>
       <div className="grid">
         <Metric label="HRV" value={t?.hrv_avg ? `${fmt(t.hrv_avg)} ms` : "–"} sub={r.hrv_range ? `range ${r.hrv_range[0].toFixed(0)}–${r.hrv_range[1].toFixed(0)}` : null} />
@@ -88,6 +184,7 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
         <p className="muted">Each caution costs 15 points and each bad signal 35. 75+ is green, 45–74 amber, below 45 red. Set your own HRV range in Settings.</p>
       </details>
 
+      {p ? <PlanLine p={p} sport={sport} minutes={minutes} setSport={setSport} setMinutes={setMinutes} /> : null}
       <h3>{override ? "Coach's workout" : w.steps.length || w.exercises?.length ? "Suggested workout" : "Suggestion"} · {w.name}</h3>
       {override ? <p><Banner kind="info">You accepted this workout from the coach. <button className="secondary" onClick={clearOverride}>Back to suggested workout</button></Banner></p> : null}
       <div className="row">
@@ -133,7 +230,33 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
         </table>
       </details> : null}
       {w.note ? <p className="muted">Note: {w.note}</p> : null}
+      {(sport === "gym" ? w.exercises?.length : w.steps.length)
+        ? <SendToWatch key={`${sport}:${w.name}:${w.minutes}`} name={w.name} sport={sport} steps={w.steps} exercises={w.exercises} />
+        : null}
     </section>
+  );
+}
+
+/** "Plan: Threshold ride, 1 h 15 · today Endurance, because readiness is amber", with a shortcut back to the plan. */
+function PlanLine({ p, sport, minutes, setSport, setMinutes }: {
+  p: PlanToday; sport: Sport; minutes: number; setSport: (s: Sport) => void; setMinutes: (m: number) => void;
+}) {
+  const rest = p.planned.kind === "rest";
+  const follows = p.used && minutes === planMinutes(p.planned.minutes);
+  const canFollow = !rest && SPORTS.includes(p.planned.sport as Sport) && !follows;
+  return (
+    <p className="muted">
+      <Link to="/plan">Plan</Link>: <b>{p.planned.label}</b>
+      {p.others.length ? ` (+ ${p.others.map((o) => o.label).join(", ")})` : ""}
+      {p.changed && p.reason ? <> · {p.reason}</> : null}
+      {canFollow ? (
+        <> · <button className="link" onClick={() => {
+          if (p.planned.sport !== sport) setSport(p.planned.sport as Sport);
+          setMinutes(planMinutes(p.planned.minutes));
+        }}>Use the planned session</button></>
+      ) : null}
+      {!p.used && !rest && p.planned.sport === sport ? " · you picked a different session" : ""}
+    </p>
   );
 }
 

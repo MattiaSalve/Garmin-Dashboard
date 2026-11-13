@@ -19,3 +19,13 @@ def test_single_day_and_decay():
     # Form on day 1 uses day 0's values (both zero) and is negative afterwards.
     assert out[0]["form"] == 0
     assert out[1]["form"] < 0
+
+
+def test_form_today_includes_yesterdays_load_but_not_todays():
+    from garmin_dashboards.fitness import form_today
+
+    assert form_today([]) is None
+    yesterday_hard = fitness_series({date(2026, 1, 1): 0.0, date(2026, 1, 2): 100.0}, end=date(2026, 1, 3))
+    assert form_today(yesterday_hard) < 0
+    today_hard = fitness_series({date(2026, 1, 2): 0.0, date(2026, 1, 3): 100.0}, end=date(2026, 1, 3))
+    assert form_today(today_hard) == 0

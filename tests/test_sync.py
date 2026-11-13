@@ -1,7 +1,6 @@
 import json
 import sqlite3
 
-from garmin_dashboards import db
 from garmin_dashboards.sync import PAGE_SIZE, fetch_activities, sync
 
 
@@ -29,12 +28,10 @@ def test_incremental_fetch_stops_at_known_page():
     assert api.calls == 1
 
 
-def test_sync_counts_new_and_upserts(tmp_path, request):
+def test_sync_counts_new_and_upserts(tmp_path):
     path = str(tmp_path / "t.db")
-    token = db._active_db.set(path)
-    request.addfinalizer(lambda: db._active_db.reset(token))
-    assert sync(FakeApi([3, 2, 1]), "me") == (3, 3)
-    assert sync(FakeApi([4, 3, 2, 1]), "me") == (1, 4)
+    assert sync(FakeApi([3, 2, 1]), "me", db_path=path) == (3, 3)
+    assert sync(FakeApi([4, 3, 2, 1]), "me", db_path=path) == (1, 4)
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM activities").fetchone()[0] == 4
         raw, synced = conn.execute("SELECT raw_json, last_synced FROM activities LIMIT 1").fetchone()

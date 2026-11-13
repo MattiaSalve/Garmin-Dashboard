@@ -75,10 +75,23 @@ for today in "sport_today".
   Leave it null when the workout is for sport_today. A bodyweight, home, "no gym" or strength request is a
   "gym" workout built from adjusted_exercises using bodyweight or minimal-equipment exercises. Use the "gym"
   block (goal and days since each muscle group was trained) and the levels to fit it.
-- The athlete may follow up with a message, e.g. to change the plan (shorter, different focus, a hill
+- The athlete may follow up with a message, e.g. to change today's workout (shorter, different focus, a hill
   they have to ride). Answer it directly, keep the earlier context, and when the workout changes return
   the complete updated adjusted_steps (not just the changed part). The athlete's request overrides
-  "keep the same total duration", but still push back in the summary if a change looks unwise for their recovery."""
+  "keep the same total duration", but still push back in the summary if a change looks unwise for their recovery.
+- "training_plan" (when present) is the athlete's multi-week plan, built by rules from their goals, sports and
+  weekly time. "weeks" lists this week and next day by day (planned sessions, status, what was done),
+  "last_weeks_planned_vs_done" shows how well they followed it, and "open_proposals" are changes the rules have
+  already suggested. Only when the athlete asks you to review or change the plan (e.g. "I can't train on
+  Thursday", "make next week lighter", "review my plan"), return plan_changes: each one sets a day's session
+  (day as YYYY-MM-DD, slot 0 for the main session or 1 for a second one, sport, kind, minutes, and a one-line
+  note saying why). Use kind "rest" to clear a session. Otherwise leave plan_changes null.
+- Plan changes: use only kinds listed in "kinds_by_sport" and the athlete's chosen sports; stay within their
+  hours_per_week and sessions_per_week; keep hard sessions (tempo, sweet_spot, fartlek, threshold, vo2max) on
+  non-consecutive days and not the day after the long session; never change locked sessions or days before
+  today; and when recovery is poor or they recently did much more than planned, make the coming days easier,
+  not harder. Never add sessions to catch up on missed ones. Fewer, well-reasoned changes beat many. The athlete
+  approves each change set before it is applied, so explain it in the summary."""
 
 
 class CoachStep(BaseModel):
@@ -172,6 +185,46 @@ _SPORT_WORDS = (
 )
 
 
+class CoachPlanChange(BaseModel):
+    """One day of the plan as the coach wants it. kind "rest" clears the slot."""
+    day: str
+    slot: int = 0
+    sport: str = "rest"
+    kind: str = "rest"
+    minutes: int = 0
+    note: str = ""
+
+    @field_validator("slot", mode="before")
+    @classmethod
+    def _slot(cls, v):
+        return min(1, max(0, _first_number(v, 0)))
+
+    @field_validator("minutes", mode="before")
+    @classmethod
+    def _minutes(cls, v):
+        return _first_number(v, 0)
+
+    @field_validator("sport", mode="before")
+    @classmethod
+    def _sport(cls, v):
+        text = str(v or "").lower()
+        if text in ("", "rest", "none", "off"):
+            return "rest"
+        return next((s for s, words in _SPORT_WORDS if any(w in text for w in words)), text)
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _kind(cls, v):  # "Sweet spot" -> "sweet_spot"
+        text = re.sub(r"[^a-z0-9]+", "_", str(v or "rest").lower()).strip("_")
+        return {"vo2_max": "vo2max", "off": "rest", "rest_day": "rest", "long_ride": "long", "long_run": "long",
+                "long_swim": "long", "lower_body": "lower", "upper_body": "upper", "full_body": "full"}.get(text, text)
+
+    @field_validator("note", "day", mode="before")
+    @classmethod
+    def _text(cls, v):
+        return "" if v is None else str(v)
+
+
 class CoachAdvice(BaseModel):
     summary: str
     agree_with_suggestion: bool
@@ -180,6 +233,7 @@ class CoachAdvice(BaseModel):
     adjusted_steps: list[CoachStep] | None = None
     cautions: list[str] = Field(default_factory=list)
     adjusted_exercises: list[CoachExercise] | None = None  # gym sessions only
+    plan_changes: list[CoachPlanChange] | None = None  # edits to the training plan, proposed to the athlete
 
     @field_validator("cautions", mode="before")
     @classmethod
@@ -229,6 +283,7 @@ def build_payload(
     threshold_pace_s: float | None = None,
     pace_unit: str = "",
     gym: dict | None = None,
+    plan: dict | None = None,
 ) -> dict:
     """Compact, identifier-free summary of the last 7 days plus today's verdict."""
     keep = ("day", "hrv_avg", "rhr", "sleep_score", "sleep_s", "bb_high")
@@ -269,6 +324,7 @@ def build_payload(
             }
         ),
         **({"gym": {"goal_label": gym["goal_label"], "days_since_trained": gym["days_since"]}} if gym else {}),
+        **({"training_plan": plan} if plan else {}),
     }
 
 

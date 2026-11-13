@@ -140,3 +140,24 @@ def test_loose_cycling_steps_and_clear_errors():
         coach.ask_coach(payload(), post=lambda b, k: reply('{"summary": "s", "agr', "length"), api_key="k")
     with pytest.raises(coach.CoachError, match="empty reply"):
         coach.ask_coach(payload(), post=lambda b, k: reply("   "), api_key="k")
+
+
+def test_plan_block_is_sent_and_plan_changes_are_parsed_forgivingly():
+    r = Readiness("green", 90, [], "h", (96, 124), True)
+    p = coach.build_payload(r, suggest(r, 60, INTENSITY, date(2026, 11, 8)), WELLNESS, INTENSITY, 0.0, 252,
+                            plan={"today": "2026-11-08", "weeks": []})
+    assert p["training_plan"]["today"] == "2026-11-08"
+    assert "training_plan" not in payload()
+    advice = coach.CoachAdvice.model_validate({
+        "summary": "Lighter Thursday.", "agree_with_suggestion": True,
+        "plan_changes": [
+            {"day": "2026-11-12", "slot": "1", "sport": "Bike", "kind": "Sweet spot", "minutes": "60 min", "note": None},
+            {"day": "2026-11-13", "sport": None, "kind": "Rest day"},
+            {"day": "2026-11-14", "sport": "gym", "kind": "Full body", "minutes": 45},
+        ],
+    })
+    a, b, c = advice.plan_changes
+    assert (a.slot, a.sport, a.kind, a.minutes, a.note) == (1, "cycling", "sweet_spot", 60, "")
+    assert (b.slot, b.sport, b.kind) == (0, "rest", "rest")
+    assert (c.sport, c.kind) == ("gym", "full")
+    assert coach.CoachAdvice.model_validate({"summary": "x", "agree_with_suggestion": True}).plan_changes is None

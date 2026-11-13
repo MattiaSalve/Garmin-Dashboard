@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, useFetch } from "../api";
 import { useNavigate } from "react-router-dom";
 import { Banner } from "../components";
+import { PACE_UNIT, paceFor, rpeFor } from "../lib";
 import { useWorkout, type Sport, type Workout } from "../workout";
 import { GymSession, gymMinutes, type GymExercise } from "./GymSession";
 import type { WorkoutStep } from "./WorkoutChart";
@@ -21,7 +22,7 @@ type Turn = { role: "user"; content: string } | { role: "assistant"; content: st
 
 const KEY = "openrouter_key"; // remembered in this browser, never sent anywhere but the coach call
 
-function loadKey(): string {
+export function loadKey(): string {
   try { return localStorage.getItem(KEY) ?? sessionStorage.getItem(KEY) ?? ""; } catch { return ""; }
 }
 function saveKey(key: string) {
@@ -31,7 +32,8 @@ function saveKey(key: string) {
   } catch { /* storage blocked: the key just won't be remembered */ }
 }
 
-export function Coach({ ftp, thresholdPace, paceUnit }: { ftp: number; thresholdPace: number | null; paceUnit: string }) {
+/** `settings` holds every sport's threshold pace, so a workout proposed for another sport gets its own pace. */
+export function Coach({ ftp, settings }: { ftp: number; settings: Record<string, number | null> }) {
   const { minutes, sport, applyWorkout, gymFocus } = useWorkout();
   const navigate = useNavigate();
   const [applied, setApplied] = useState<number | null>(null);
@@ -140,21 +142,23 @@ export function Coach({ ftp, thresholdPace, paceUnit }: { ftp: number; threshold
         {!thread.length && !busy ? (
           <p className="muted">Ask anything about your training, or get a second opinion on today's workout.</p>
         ) : null}
-        {thread.map((t, i) =>
-          t.role === "user" ? (
+        {thread.map((t, i) => {
+          const target = t.role === "assistant" ? t.advice.workout_sport ?? sport : sport;
+          const thresholdPace = paceFor(target, settings);
+          const paceUnit = PACE_UNIT[target] ?? "";
+          return t.role === "user" ? (
             <div key={i} className="card" style={{ marginLeft: 48 }}><b>You</b><p>{t.content}</p></div>
           ) : (
-            <AdviceCard key={i} advice={t.advice} ftp={ftp} sport={t.advice.workout_sport ?? sport} selectedSport={sport} thresholdPace={thresholdPace} paceUnit={paceUnit}
+            <AdviceCard key={i} advice={t.advice} ftp={ftp} sport={target} selectedSport={sport} thresholdPace={thresholdPace} paceUnit={paceUnit}
               applied={applied === i}
               onAccept={() => {
-                const target = t.advice.workout_sport ?? sport;
                 if (target !== sport) keepThread.current = true;
                 applyWorkout(toWorkout(t.advice, ftp, target, thresholdPace, paceUnit), target);
                 setApplied(i);
                 navigate("/");
               }} />
-          ),
-        )}
+          );
+        })}
         {busy ? <p className="muted">Coach is thinking…</p> : null}
       </div>
       <form className="coach-composer" onSubmit={(e) => { e.preventDefault(); send(); }}>
@@ -231,7 +235,7 @@ export function toWorkout(advice: Advice, ftp: number, sport: string, thresholdP
       step.watts_low = Math.round((low * ftp) / 100);
       step.watts_high = Math.round((high * ftp) / 100);
     } else {
-      step.rpe = high < 50 ? "rest" : String(Math.min(10, Math.max(1, Math.round(high / 10))));
+      step.rpe = rpeFor(high / 100);
       step.pace_unit = paceUnit;
       if (thresholdPace && low >= 55) {
         step.pace_fast = pace((thresholdPace * 100) / high);
