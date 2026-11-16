@@ -279,7 +279,7 @@ def _levels(db: str, settings: dict, today: date, aerobic_fitness: float | None)
     return levels
 
 
-def _home_context(db: str, minutes: int, today: date, sport: str = "cycling", focus: str | None = None) -> dict:
+def _home_context(db: str, minutes: int, today: date, sport: str = "cycling", focus: str | None = None, as_planned: bool = False) -> dict:
     settings = all_settings(db)
     wellness = daily_wellness(today - timedelta(days=90), today, db)
     intensity = daily_intensity(today - timedelta(days=30), today, db)
@@ -301,7 +301,10 @@ def _home_context(db: str, minutes: int, today: date, sport: str = "cycling", fo
     if plan_today:
         plan_today["used"] = use_plan
     if use_plan:
-        suggestion = plan.plan_suggestion(plan_today, readiness, intensity, trained, today, levels[sport]["level"], gym_goal, minutes, kit)
+        # as_planned: the athlete chose to do the session as written, ignoring today's readiness downgrade.
+        # plan_today still carries the downgrade and its reason, so Home can explain what it overrode.
+        planned = plan.today_from_plan(_plan_rows(db, today, today), Readiness("green", 100, [], ""), [], today) if as_planned else plan_today
+        suggestion = plan.plan_suggestion(planned, readiness, intensity, trained, today, levels[sport]["level"], gym_goal, minutes, kit)
     elif sport == gym.KEY:
         suggestion = gym.suggest(readiness, minutes, intensity, trained, today, gym_goal, levels[sport]["level"], focus, kit)
     else:
@@ -356,7 +359,7 @@ def _ftp_hint(estimate: float | None, current: float) -> dict | None:
 
 @router.get("/home")
 def home(
-    minutes: int = Query(60, ge=20, le=600), sport: str = "cycling", focus: str | None = None,
+    minutes: int = Query(60, ge=20, le=600), sport: str = "cycling", focus: str | None = None, as_planned: bool = False,
     session: Session = Depends(current_session), today: date = Depends(local_today),
 ) -> dict:
     db = session.db_path
@@ -364,7 +367,7 @@ def home(
     focus = _check_focus(focus)
     is_gym = sport == gym.KEY
     group = gym.GROUP_NAME if is_gym else sport.title()  # "cycling" -> the "Cycling" entry in SPORT_GROUPS
-    c = _home_context(db, minutes, today, sport, focus)
+    c = _home_context(db, minutes, today, sport, focus, as_planned)
     today, settings, series = c["today"], c["settings"], c["series"]
     suggestion, ftp = c["suggestion"], c["ftp"]
     profile = None if is_gym else SPORTS[sport]

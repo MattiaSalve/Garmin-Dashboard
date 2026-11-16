@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
 import { query, useFetch } from "../api";
-import { ActivityRow, ActivityTable, Loading, Metric } from "../components";
+import { ActivityRow, ActivityTable, CollapsibleCard, Loading, Metric } from "../components";
 import { daysAgo, displaySport, fmt, fmtHM, isoDate } from "../lib";
 import { useWorkout } from "../workout";
 import { Week, useHomeData } from "./Home";
+import { Button } from "@/ui/button";
 
 interface Summary {
   activity_count: number; total_distance_km: number; total_moving_duration_h: number; total_elevation_gain_m: number;
@@ -21,8 +22,7 @@ export function Activities() {
   const home = useHomeData(minutes, sport);
   return (
     <>
-    <section className="card">
-      <h2>Last 7 days</h2>
+    <CollapsibleCard id="week:last7" title="Last 7 days">
       <Loading error={week.error ?? rows.error} loading={week.loading} />
       {s && p ? (
         <>
@@ -36,7 +36,7 @@ export function Activities() {
         </>
       ) : null}
       {rows.data ? <ActivityTable rows={rows.data} /> : null}
-    </section>
+    </CollapsibleCard>
     {home.data ? <Week d={home.data} /> : <Loading error={home.error} loading={home.loading} />}
     </>
   );
@@ -85,8 +85,7 @@ export function Find() {
     </label>
   );
   return (
-    <section className="card">
-      <h2>Find activities</h2>
+    <CollapsibleCard id="find:search" title="Find activities">
       <div className="row">
         <label className="field">Search<input value={text} placeholder="Name or place" onChange={(e) => setText(e.target.value)} /></label>
         <label className="field">Sport
@@ -106,11 +105,11 @@ export function Find() {
         {number("minKm", "Min km")}{number("maxKm", "Max km")}
         {number("minElev", "Min elev. (m)")}{number("maxElev", "Max elev. (m)")}
         {number("minH", "Min hours")}{number("maxH", "Max hours")}
-        {sports.length ? <button className="secondary" onClick={() => setSports([])}>Clear sports</button> : null}
+        {sports.length ? <Button variant="secondary" onClick={() => setSports([])}>Clear sports</Button> : null}
       </div>
       <p className="muted">{rows.data ? `${rows.data.length} activities` : ""}</p>
       <Loading error={rows.error} loading={rows.loading} />
       {rows.data ? <ActivityTable rows={rows.data} /> : null}
-    </section>
+    </CollapsibleCard>
   );
 }

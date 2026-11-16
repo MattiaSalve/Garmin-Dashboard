@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { displaySport, fmt, fmtHM } from "./lib";
 
@@ -89,5 +90,32 @@ export function ChartTooltip({ title, rows }: { title?: string; rows: { name: st
         </div>
       ))}
     </div>
+  );
+}
+
+const OPEN_KEY = (id: string) => `card_open:${id}`;
+
+/** A card with a title that folds away. The state is remembered in this browser per `id`. */
+export function CollapsibleCard({ id, title, aside, defaultOpen = true, children }: {
+  id: string; title: ReactNode; aside?: ReactNode; defaultOpen?: boolean; children: ReactNode;
+}) {
+  const [open, setOpenState] = useState(() => {
+    try { const v = localStorage.getItem(OPEN_KEY(id)); return v === null ? defaultOpen : v === "1"; } catch { return defaultOpen; }
+  });
+  const setOpen = (o: boolean) => {
+    setOpenState(o);
+    try { localStorage.setItem(OPEN_KEY(id), o ? "1" : "0"); } catch { /* not remembered */ }
+  };
+  return (
+    <section className="card">
+      <div className="card-head">
+        <button type="button" className="fold" aria-expanded={open} onClick={() => setOpen(!open)}>
+          <ChevronDown size={18} className={open ? "" : "-rotate-90"} aria-hidden />
+          <h2>{title}</h2>
+        </button>
+        {aside ? <div className="card-aside">{aside}</div> : null}
+      </div>
+      {open ? <div className="fold-body">{children}</div> : null}
+    </section>
   );
 }

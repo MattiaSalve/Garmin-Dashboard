@@ -6,6 +6,7 @@ import { PACE_UNIT, paceFor, rpeFor } from "../lib";
 import { useWorkout, type Sport, type Workout } from "../workout";
 import { GymSession, gymMinutes, type GymExercise } from "./GymSession";
 import type { WorkoutStep } from "./WorkoutChart";
+import { Button } from "@/ui/button";
 
 interface Advice {
   summary: string;
@@ -133,7 +134,7 @@ export function Coach({ ftp, settings }: { ftp: number; settings: Record<string,
               onChange={(e) => { setGoalsText(e.target.value); setGoalsSaved(false); }} />
           </label>
           <p>
-            <button type="button" onClick={saveGoals} disabled={goalsText === (goals.data?.goals ?? "")}>Save goals</button>
+            <Button type="button" onClick={saveGoals} disabled={goalsText === (goals.data?.goals ?? "")}>Save goals</Button>
             {goalsSaved ? <span className="muted"> Saved. The coach uses it on every request.</span> : null}
           </p>
           <p className="muted">Sends a summary of the last 7 days of recovery and training numbers (no names, places or account details) to OpenRouter, using your key. Your goals text and messages are sent as written, so leave out personal details.</p>
@@ -168,9 +169,9 @@ export function Coach({ ftp, settings }: { ftp: number; settings: Record<string,
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
         <div className="coach-actions">
           {thread.length
-            ? <button type="button" className="secondary" disabled={!canSend} onClick={() => ask()}>Start over</button>
-            : <button type="button" className="secondary" disabled={!canSend} onClick={() => ask()}>Advise on today's workout</button>}
-          <button type="submit" disabled={!canSend || !draft.trim()}>Send</button>
+            ? <Button type="button" variant="secondary" disabled={!canSend} onClick={() => ask()}>Start over</Button>
+            : <Button type="button" variant="secondary" disabled={!canSend} onClick={() => ask()}>Advise on today's workout</Button>}
+          <Button type="submit" disabled={!canSend || !draft.trim()}>Send</Button>
         </div>
       </form>
     </div>
@@ -210,7 +211,7 @@ function AdviceCard({ advice, ftp, sport, selectedSport, thresholdPace, paceUnit
       {advice.adjusted_exercises?.length ? <GymSession exercises={advice.adjusted_exercises} /> : null}
       {advice.adjusted_steps || advice.adjusted_exercises?.length ? (
         <p>
-          <button type="button" onClick={onAccept} disabled={applied}>{applied ? "Applied to Today ✓" : sport !== selectedSport ? `Use this workout (switches to ${SPORT_NAME[sport] ?? sport})` : "Use this workout"}</button>
+          <Button type="button" onClick={onAccept} disabled={applied}>{applied ? "Applied to Today ✓" : sport !== selectedSport ? `Use this workout (switches to ${SPORT_NAME[sport] ?? sport})` : "Use this workout"}</Button>
           <span className="muted"> {applied ? "Shown as today's workout on Home." : sport !== selectedSport ? `Saved under ${SPORT_NAME[sport] ?? sport}; your ${selectedSport} workout stays as it was.` : "Replaces the suggested workout on Home."}</span>
         </p>
       ) : null}

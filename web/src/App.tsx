@@ -12,6 +12,7 @@ import { Ride } from "./pages/Ride";
 import { SettingsCard } from "./pages/Settings";
 import { Trends } from "./pages/Trends";
 import { WorkoutProvider, useWorkout } from "./workout";
+import { Button } from "@/ui/button";
 
 interface Me {
   email: string;
@@ -65,8 +66,8 @@ function SignIn({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
           </label>
           {error ? <Banner kind="error">{error}</Banner> : null}
           <div className="row">
-            <button disabled={busy}>{busy ? "Checking…" : "Verify"}</button>
-            <button type="button" className="secondary" onClick={restart}>Back</button>
+            <Button disabled={busy}>{busy ? "Checking…" : "Verify"}</Button>
+            <Button type="button" variant="secondary" onClick={restart}>Back</Button>
           </div>
         </form>
       ) : (
@@ -81,7 +82,7 @@ function SignIn({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
             </label>
             <label><input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> Keep me signed in on this browser (30 days)</label>
             {error ? <Banner kind="error">{error}</Banner> : null}
-            <button disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
+            <Button disabled={busy}>{busy ? "Signing in…" : "Sign in"}</Button>
           </form>
         </>
       )}
@@ -93,9 +94,9 @@ function SyncButton() {
   const { busy, message, run } = useSync();
   return (
     <>
-      <button className="secondary" disabled={busy} onClick={() => run(false)}>{busy ? "Syncing…" : "Sync from Garmin"}</button>
-      <button className="secondary" disabled={busy} title="Re-download the entire history" onClick={() => run(true)}>Full re-sync</button>
-      {message ? <span className="muted" style={message.kind === "error" ? { color: "var(--bad)" } : undefined}>{message.text}</span> : null}
+      <Button variant="secondary" disabled={busy} onClick={() => run(false)}>{busy ? "Syncing…" : "Sync from Garmin"}</Button>
+      <Button variant="secondary" disabled={busy} title="Re-download the entire history" onClick={() => run(true)}>Full re-sync</Button>
+      {message ? <span className={message.kind === "error" ? "text-bad" : ""}>{message.text}</span> : null}
     </>
   );
 }
@@ -191,7 +192,7 @@ export default function App() {
         <div className="who">
           <SyncButton />
           <span>{me.email}</span>
-          <button className="secondary" onClick={signOut}>Sign out</button>
+          <Button variant="secondary" onClick={signOut}>Sign out</Button>
         </div>
       </div>
       <Routes key={refresh}>

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Area, CartesianGrid, ComposedChart, Line, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { ChartTooltip, Metric, Pills } from "../components";
 import { CHANNEL_COLORS, CHANNEL_ORDER, Channels, rangeStats, sampleIndices, trailingAverage } from "../lib";
+import { Button } from "@/ui/button";
 
 export interface Samples {
   minutes: (number | null)[];
@@ -85,7 +86,7 @@ export function RideChart({ samples, onHighlight }: { samples: Samples; onHighli
         ))}
         {samples.km ? <Pills options={["Distance", "Time"] as const} value={axis} onChange={(a) => { setAxis(a); setZoom(null); }} /> : null}
         {on.includes("Power") ? <><span className="muted">Power smoothing</span><Pills options={Object.keys(SMOOTHING)} value={smooth} onChange={setSmooth} /></> : null}
-        {zoom ? <button className="secondary" onClick={() => setZoom(null)}>Reset zoom</button> : null}
+        {zoom ? <Button variant="secondary" onClick={() => setZoom(null)}>Reset zoom</Button> : null}
       </div>
       {!shown.length ? <p className="muted">Switch on a channel above to plot it.</p> : (
         <>

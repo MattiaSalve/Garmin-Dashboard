@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, useFetch } from "../api";
 import { Banner, Loading } from "../components";
+import { Button } from "@/ui/button";
 
 const LEVEL_OPTIONS = [["", "Estimate from my training and fitness"], ["1", "Beginner"], ["2", "Intermediate"], ["3", "Advanced"]];
 
@@ -64,7 +65,7 @@ export function SettingsCard() {
               </label>
             ))}
           </div>
-          <p><button>Save</button></p>
+          <p><Button>Save</Button></p>
           {status ? <Banner kind={status.kind}>{status.text}</Banner> : null}
         </form>
       ) : null}
@@ -104,9 +105,9 @@ function DeleteAccount() {
       <label className="field" style={{ maxWidth: 280 }}>Type <b>delete</b> to confirm
         <input value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="off" />
       </label>
-      <p><button className="danger" disabled={busy || confirm.trim().toLowerCase() !== "delete"} onClick={remove}>
+      <p><Button variant="danger" disabled={busy || confirm.trim().toLowerCase() !== "delete"} onClick={remove}>
         {busy ? "Deleting…" : "Delete my data"}
-      </button></p>
+      </Button></p>
       {error ? <Banner kind="error">{error}</Banner> : null}
     </details>
   );

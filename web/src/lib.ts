@@ -263,3 +263,11 @@ export function buildMessage(r: BuildResult, mode: "all" | "topup" | "week"): { 
   const what = mode === "week" ? "That week was" : mode === "topup" ? "The coming weeks were" : "Your plan was";
   return { kind: "info", text: `${what} built by the AI coach.${rules}${details.length ? " Kept within your limits:" : ""}`, details };
 }
+
+/** One emoji per sport, for the plan calendar. */
+export const SPORT_EMOJI: Record<string, string> = { cycling: "🚴", running: "🏃", swimming: "🏊", gym: "🏋️" };
+export function sportEmoji(sport: string, kind?: string): string {
+  if (kind === "rest" || sport === "rest") return "😴";
+  if (kind === "event") return "🏁";
+  return SPORT_EMOJI[sport] ?? "🏅";
+}

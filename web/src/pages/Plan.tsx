@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, useFetch } from "../api";
-import { Banner, Loading } from "../components";
+import { Banner, CollapsibleCard, Loading } from "../components";
 import {
-  STATUS, buildMessage, changeLine, fmtMinutes, fmtPace, goalLine, parsePace, shortDay,
+  STATUS, buildMessage, changeLine, fmtMinutes, fmtPace, goalLine, parsePace, shortDay, sportEmoji,
   type BuildResult, type DayStatus, type PlanChange, type PlanGoal,
 } from "../lib";
 import { loadKey } from "./Coach";
 import { GymSession, type GymExercise } from "./GymSession";
 import { WorkoutChart, type WorkoutStep } from "./WorkoutChart";
+import { Button } from "@/ui/button";
+import { Dialog, DialogContent } from "@/ui/dialog";
+import { Pencil, Plus } from "lucide-react";
 
 // ------------------------------------------------------------------ API shapes
 
@@ -151,11 +154,8 @@ export function Plan() {
   const later = data.weeks.filter((w) => !w.detailed);
   return (
     <>
-      <section className="card">
-        <div className="card-head">
-          <h2>Training plan</h2>
-          <button className="secondary" onClick={() => setEditingSetup(true)}>Edit goals and schedule</button>
-        </div>
+      <CollapsibleCard id="plan:overview" title="Training plan"
+        aside={<Button variant="secondary" size="sm" onClick={() => setEditingSetup(true)}><Pencil size={14} /> Edit goals and schedule</Button>}>
         <ul className="plain">
           {setup.goals.length ? setup.goals.map((g, i) => <li key={i}>{i === 0 ? <b>{goalLine(g, data.today)}</b> : goalLine(g, data.today)}</li>)
             : <li>General fitness (no goal set)</li>}
@@ -180,12 +180,12 @@ export function Plan() {
         )}
         <div className="row">
           {key ? <ModelPicker model={model} setModel={setModel} models={models} /> : null}
-          <button className="secondary" disabled={!!busy}
+          <Button variant="secondary" disabled={!!busy}
             title={key ? "The AI coach rebuilds every automatic session from today on. Sessions you edited, locked or applied stay."
               : "Rebuild every automatic session from today on. Sessions you edited, locked or applied stay."}
-            onClick={() => build("all")}>Regenerate</button>
-          <button className="secondary" disabled={!!busy}
-            onClick={() => { if (confirm("Delete the plan, its goals and every edit?")) act(() => api("/plan", { method: "DELETE" })); }}>Start over</button>
+            onClick={() => build("all")}>Regenerate</Button>
+          <Button variant="secondary" disabled={!!busy}
+            onClick={() => { if (confirm("Delete the plan, its goals and every edit?")) act(() => api("/plan", { method: "DELETE" })); }}>Start over</Button>
         </div>
         {busy ? <p><Banner kind="info">{busy}</Banner></p> : null}
         {message ? (
@@ -193,13 +193,11 @@ export function Plan() {
             {message.details?.length ? <ul>{message.details.map((d, i) => <li key={i}>{d}</li>)}</ul> : null}
           </Banner></div>
         ) : null}
-      </section>
+      </CollapsibleCard>
       <Proposals proposals={data.proposals} onChange={reload} />
       <Review onDone={reload} model={model} />
-      {now.map((w) => (
-        <WeekCard key={w.week_start} week={w} today={data.today} setup={setup} onChange={reload}
-          onHoursSet={key ? (ws) => build("week", ws) : undefined} />
-      ))}
+      <PlanCalendar weeks={now} today={data.today} setup={setup} onChange={reload}
+        onHoursSet={key ? (ws) => build("week", ws) : undefined} />
       {later.length ? <LaterWeeks weeks={later} /> : null}
     </>
   );
@@ -347,12 +345,12 @@ function SetupCard({ setup, today, aiReady, onSaved, onCancel }: {
           <label className="field">Name (optional)
             <input value={g.name} maxLength={80} onChange={(e) => setGoal(i, { name: e.target.value })} placeholder="e.g. Spring gran fondo" />
           </label>
-          <button type="button" className="secondary" onClick={() => setGoals(goals.filter((_, j) => j !== i))}>Remove</button>
+          <Button type="button" variant="secondary" onClick={() => setGoals(goals.filter((_, j) => j !== i))}>Remove</Button>
         </div>
       ))}
       {goals.length < o.max_goals ? (
-        <p><button type="button" className="secondary"
-          onClick={() => setGoals([...goals, { kind: "event", sport: endurance[0] ?? "", date: "", target: "", name: "" }])}>Add a goal</button></p>
+        <p><Button type="button" variant="secondary"
+          onClick={() => setGoals([...goals, { kind: "event", sport: endurance[0] ?? "", date: "", target: "", name: "" }])}>Add a goal</Button></p>
       ) : null}
       {!goals.length ? <p className="muted">No goal: the plan keeps a steady 3-weeks-on, 1-week-easier rhythm for general fitness.</p> : null}
 
@@ -366,8 +364,8 @@ function SetupCard({ setup, today, aiReady, onSaved, onCancel }: {
 
       {error ? <p><Banner kind="error">{error}</Banner></p> : null}
       <div className="row">
-        <button disabled={busy || !chosen.length}>{busy ? "Building…" : setup.configured ? "Save and rebuild" : "Build my plan"}</button>
-        {onCancel ? <button type="button" className="secondary" onClick={onCancel}>Cancel</button> : null}
+        <Button disabled={busy || !chosen.length}>{busy ? "Building…" : setup.configured ? "Save and rebuild" : "Build my plan"}</Button>
+        {onCancel ? <Button type="button" variant="secondary" onClick={onCancel}>Cancel</Button> : null}
       </div>
       {setup.configured ? <p className="muted">Saving rebuilds the automatic sessions from today on. Sessions you edited, locked or applied stay.</p> : null}
     </form>
@@ -436,8 +434,7 @@ export function Proposals({ proposals, onChange }: { proposals: Proposal[]; onCh
     }
   };
   return (
-    <section className="card">
-      <h2>Suggested changes</h2>
+    <CollapsibleCard id="plan:proposals" title="Suggested changes">
       {proposals.map((p) => (
         <div key={p.id} className="proposal">
           <p><b>{p.source === "coach" ? "From the AI coach" : "From your training"}:</b> {p.reason}</p>
@@ -447,13 +444,13 @@ export function Proposals({ proposals, onChange }: { proposals: Proposal[]; onCh
             ))}
           </ul>
           <div className="row">
-            <button disabled={busy === p.id} onClick={() => act(p, "apply")}>Apply</button>
-            <button className="secondary" disabled={busy === p.id} onClick={() => act(p, "dismiss")}>Dismiss</button>
+            <Button disabled={busy === p.id} onClick={() => act(p, "apply")}>Apply</Button>
+            <Button variant="secondary" disabled={busy === p.id} onClick={() => act(p, "dismiss")}>Dismiss</Button>
           </div>
         </div>
       ))}
       {error ? <p><Banner kind="error">{error}</Banner></p> : null}
-    </section>
+    </CollapsibleCard>
   );
 }
 
@@ -487,9 +484,8 @@ function Review({ onDone, model }: { onDone: () => void; model: string }) {
     }
   };
   return (
-    <section className="card">
-      <details>
-        <summary>Ask the AI coach to review the plan</summary>
+    <CollapsibleCard id="plan:review" title="Ask the AI coach to review the plan" defaultOpen={false}>
+      <div>
         <p className="muted">
           The coach sees this week and next, how you followed the last two weeks, your recovery and your goals (no names, places or
           account details). Any changes it suggests appear above for you to apply or dismiss. Uses the OpenRouter key from the
@@ -499,7 +495,7 @@ function Review({ onDone, model }: { onDone: () => void; model: string }) {
           <textarea rows={2} maxLength={1000} value={message} onChange={(e) => setMessage(e.target.value)}
             placeholder="e.g. I can't train on Thursday next week, and I'd like a longer ride on Sunday instead of Saturday." />
         </label>
-        <p><button disabled={busy} onClick={ask}>{busy ? "The coach is reviewing…" : "Review my plan"}</button></p>
+        <p><Button disabled={busy} onClick={ask}>{busy ? "The coach is reviewing…" : "Review my plan"}</Button></p>
         {error ? <Banner kind="error">{error}</Banner> : null}
         {reply ? (
           <div>
@@ -509,19 +505,65 @@ function Review({ onDone, model }: { onDone: () => void; model: string }) {
             {reply.plan_skipped.length ? <p className="muted">Left out: {reply.plan_skipped.join(" ")}</p> : null}
           </div>
         ) : null}
-      </details>
-    </section>
+      </div>
+    </CollapsibleCard>
   );
 }
 
-// ------------------------------------------------------------------ weeks and days
+// ------------------------------------------------------------------ calendar
 
-function WeekCard({ week, today, setup, onChange, onHoursSet }: {
-  week: PlanWeek; today: string; setup: Setup; onChange: () => void; onHoursSet?: (weekStart: string) => void;
+const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function PlanCalendar({ weeks, today, setup, onChange, onHoursSet }: {
+  weeks: PlanWeek[]; today: string; setup: Setup; onChange: () => void; onHoursSet?: (weekStart: string) => void;
 }) {
-  const [open, setOpen] = useState<string | null>(null); // "day:slot", or "day:new" for a new session
+  const [picked, setPicked] = useState<string | null>(null); // the day open in the dialog
+  const [notice, setNotice] = useState<{ kind: "error" | "amber"; text: string } | null>(null);
+  /** Drag a session onto another day. The server checks spacing and keeps its rules; its warnings are shown. */
+  const move = async (from: { day: string; slot: number }, to: string) => {
+    if (from.day === to) return;
+    setNotice(null);
+    try {
+      const r = await api<{ warnings?: string[] }>(`/plan/day/${from.day}/${from.slot}/move`, { body: { to } });
+      if (r?.warnings?.length) setNotice({ kind: "amber", text: r.warnings.join(" ") });
+    } catch (e) {
+      setNotice({ kind: "error", text: (e as Error).message });
+    }
+    onChange();
+  };
+  const day = weeks.flatMap((w) => w.days).find((d) => d.day === picked) ?? null;
+  return (
+    <CollapsibleCard id="plan:calendar" title="Calendar" aside={<span>Click a day to edit it, or drag a session to another day</span>}>
+      {notice ? <p><Banner kind={notice.kind}>{notice.text}</Banner></p> : null}
+      <div className="cal-grid" aria-hidden>
+        {DOW.map((d) => <div key={d} className="cal-dow">{d}</div>)}
+      </div>
+      <div style={{ marginTop: 6 }}>
+        {weeks.map((w) => <CalendarWeek key={w.week_start} week={w} today={today} setup={setup} onPick={setPicked} onMove={move} onChange={onChange} onHoursSet={onHoursSet} />)}
+      </div>
+      <Dialog open={!!day} onOpenChange={(o) => { if (!o) setPicked(null); }}>
+        {day ? <DayDialog d={day} today={today} setup={setup} onChange={onChange} onClose={() => setPicked(null)} /> : null}
+      </Dialog>
+    </CollapsibleCard>
+  );
+}
+
+function sessionName(s: PlanSession, setup: Setup): string {
+  const kind = setup.options.kind_labels[s.kind] ?? s.kind;
+  const t = s.kind === "event" ? "" : ` · ${fmtMinutes(s.minutes)}`;
+  return `${kind}${t}`;
+}
+
+const DRAG_TYPE = "application/x-plan-session";
+
+function CalendarWeek({ week, today, setup, onPick, onMove, onChange, onHoursSet }: {
+  week: PlanWeek; today: string; setup: Setup; onPick: (day: string) => void; onMove: (from: { day: string; slot: number }, to: string) => void;
+  onChange: () => void; onHoursSet?: (weekStart: string) => void;
+}) {
+  const [over, setOver] = useState<string | null>(null); // the day a session is being dragged over
   const [hours, setHours] = useState(week.override_hours === null ? "" : String(week.override_hours));
   const [error, setError] = useState<string | null>(null);
+  const [showHours, setShowHours] = useState(false);
   useEffect(() => setHours(week.override_hours === null ? "" : String(week.override_hours)), [week.override_hours]);
   const saveHours = async (value: number | null) => {
     setError(null);
@@ -535,77 +577,117 @@ function WeekCard({ week, today, setup, onChange, onHoursSet }: {
   };
   const thisWeek = week.week_start <= today && today <= week.days[6]?.day;
   return (
-    <section className="card">
-      <div className="card-head">
-        <h2>{thisWeek ? "This week" : week.past ? "Last week" : `Week of ${shortDay(week.week_start)}`}
+    <div className="cal-week">
+      <div className="cal-week-head">
+        <b>{thisWeek ? "This week" : week.past ? "Last week" : `Week of ${shortDay(week.week_start)}`}
           {week.phase ? <span className="muted"> · {PHASE_LABEL[week.phase] ?? week.phase}</span> : null}
           {!week.past ? <span className="chip" title={week.builder === "ai" ? "Sessions written by the AI coach" : "Sessions written by the rules"}>
-            {" · "}{week.builder === "ai" ? "AI coach" : "rules"}</span> : null}</h2>
+            {" · "}{week.builder === "ai" ? "AI coach" : "rules"}</span> : null}</b>
         <span className="muted">
           {week.past || thisWeek ? `${week.actual_hours.toFixed(1)} of ${week.planned_hours.toFixed(1)} h done` : `${week.planned_hours.toFixed(1)} h planned`}
           {" · load "}{week.past || thisWeek ? `${week.actual_load} / ` : ""}{week.planned_load}
+          {!week.past ? <>{" · "}<Button variant="link" className="text-sm" onClick={() => setShowHours(!showHours)}>
+            {week.override_hours !== null ? `${week.override_hours} h set` : "set hours"}</Button></> : null}
         </span>
       </div>
       {week.note ? <p className="muted">{week.note}</p> : null}
-      <div className="plan-days">
-        {week.days.map((d) => (
-          <DayRow key={d.day} d={d} today={today} setup={setup} open={open} setOpen={setOpen} onChange={onChange} />
-        ))}
-      </div>
-      {!week.past ? (
-        <div className="row" style={{ marginTop: 12 }}>
+      {showHours && !week.past ? (
+        <div className="row" style={{ marginBottom: 8 }}>
           <label className="field">Hours available this week
             <input type="number" min={0} max={30} step={0.5} value={hours} placeholder={String(setup.profile.hours_per_week)}
               onChange={(e) => setHours(e.target.value)} style={{ width: 110 }} />
           </label>
-          <button className="secondary" disabled={!hours || Number(hours) === week.override_hours} onClick={() => saveHours(Number(hours))}>Set</button>
-          {week.override_hours !== null ? <button className="secondary" onClick={() => saveHours(null)}>Back to usual</button> : null}
-          {error ? <span style={{ color: "var(--bad)" }}>{error}</span> : null}
+          <Button variant="secondary" disabled={!hours || Number(hours) === week.override_hours} onClick={() => saveHours(Number(hours))}>Set</Button>
+          {week.override_hours !== null ? <Button variant="secondary" onClick={() => saveHours(null)}>Back to usual</Button> : null}
+          {error ? <span className="basis-full text-sm text-bad">{error}</span> : null}
         </div>
       ) : null}
-    </section>
+      <div className="cal-grid">
+        {week.days.map((d) => {
+          const sessions = d.sessions.filter((s) => s.kind !== "rest");
+          const editable = d.day >= today;
+          const dayNum = new Date(d.day + "T12:00:00").getDate();
+          const label = `${shortDay(d.day)}: ${sessions.map((s) => s.label).join(", ") || "Rest"}`;
+          return (
+            <div key={d.day} role="button" tabIndex={0} aria-label={label} title={label} onClick={() => onPick(d.day)}
+              onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onPick(d.day); } }}
+              onDragOver={editable ? (e) => { if (e.dataTransfer.types.includes(DRAG_TYPE)) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setOver(d.day); } } : undefined}
+              onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver((o) => (o === d.day ? null : o)); }}
+              onDrop={editable ? (e) => {
+                const raw = e.dataTransfer.getData(DRAG_TYPE);
+                setOver(null);
+                if (!raw) return;
+                e.preventDefault();
+                onMove(JSON.parse(raw), d.day);
+              } : undefined}
+              className={`cal-cell${d.day === today ? " today" : ""}${d.day < today ? " past" : ""}${over === d.day ? " drop" : ""}`}>
+              <span className="cal-num">
+                <span>{dayNum}</span>
+                {STATUS[d.status].tone ? <span className={`dot ${STATUS[d.status].tone}`} style={{ margin: 0 }} title={STATUS[d.status].label} /> : null}
+              </span>
+              {sessions.map((s) => (
+                <span key={s.slot} className={`cal-chip${editable ? " draggable" : ""}`} draggable={editable}
+                  onDragStart={editable ? (e) => {
+                    e.dataTransfer.setData(DRAG_TYPE, JSON.stringify({ day: s.day, slot: s.slot }));
+                    e.dataTransfer.effectAllowed = "move";
+                  } : undefined}
+                  onDragEnd={() => setOver(null)}>
+                  <span className="emoji">{sportEmoji(s.sport, s.kind)}</span>
+                  <span className="name">{sessionName(s, setup)}{s.locked ? " 🔒" : ""}</span>
+                </span>
+              ))}
+              {d.activities.map((a) => (
+                <span key={a.activity_id} className="cal-chip done" title={`Done: ${a.name || "Activity"}`}>
+                  <span className="emoji">✓</span>
+                  <span className="name">{a.name || "Activity"}</span>
+                </span>
+              ))}
+              {!sessions.length && !d.activities.length ? <span className="cal-rest">Rest</span> : null}
+              {editable ? <span className="cal-plus" aria-hidden><Plus size={12} /></span> : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
-function DayRow({ d, today, setup, open, setOpen, onChange }: {
-  d: PlanDayView; today: string; setup: Setup; open: string | null; setOpen: (k: string | null) => void; onChange: () => void;
+/** Everything about one day: edit each planned session, add one, see what was done. */
+function DayDialog({ d, today, setup, onChange, onClose }: {
+  d: PlanDayView; today: string; setup: Setup; onChange: () => void; onClose: () => void;
 }) {
-  const st = STATUS[d.status];
   const editable = d.day >= today;
   const sessions = d.sessions.filter((s) => s.kind !== "rest");
-  const canAdd = editable && sessions.length < 2;
+  const [adding, setAdding] = useState(false);
+  const st = STATUS[d.status];
+  const date = new Date(d.day + "T12:00:00").toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
   return (
-    <div className={`plan-day${d.day === today ? " today" : ""}`}>
-      <div className="plan-day-head">
-        <b>{shortDay(d.day)}</b>
-        <span className="chip">{st.tone ? <span className={`dot ${st.tone}`} /> : null}{st.label}</span>
-      </div>
-      <div className="plan-day-body">
-        {sessions.length ? sessions.map((s) => {
-          const key = `${s.day}:${s.slot}`;
-          return (
-            <div key={key}>
-              <button className="session" disabled={!editable} onClick={() => setOpen(open === key ? null : key)} aria-expanded={open === key}>
-                {s.label}{s.locked ? " 🔒" : ""}
-              </button>
-              {SOURCE_NOTE[s.source] ? <span className="muted"> · {SOURCE_NOTE[s.source]}</span> : null}
-              {s.note ? <div className="muted">{s.note}</div> : null}
-              {open === key ? <SessionEditor session={s} setup={setup} today={today} onClose={() => setOpen(null)} onChange={onChange} /> : null}
+    <DialogContent title={date} description={st.label}>
+      {sessions.length ? sessions.map((s) => (
+        <div key={`${s.day}:${s.slot}`}>
+          <h3 style={{ marginTop: 0 }}>{sportEmoji(s.sport, s.kind)} {s.label}{s.locked ? " 🔒" : ""}
+            {SOURCE_NOTE[s.source] ? <span className="muted"> · {SOURCE_NOTE[s.source]}</span> : null}</h3>
+          {editable
+            ? <SessionEditor session={s} setup={setup} today={today} onClose={onClose} onChange={onChange} />
+            : s.note ? <p className="muted">{s.note}</p> : null}
+        </div>
+      )) : <p className="muted">😴 Rest day, nothing planned.</p>}
+      {d.activities.length ? (
+        <>
+          <h3>Done</h3>
+          {d.activities.map((a) => (
+            <div key={a.activity_id} className="muted">
+              ✓ <Link to={`/ride/${a.activity_id}`}>{a.name || "Activity"}</Link> · {fmtMinutes(a.minutes)}{a.km ? ` · ${a.km} km` : ""}{a.load ? ` · load ${a.load}` : ""}
             </div>
-          );
-        }) : <span className="muted">Rest</span>}
-        {d.activities.map((a) => (
-          <div key={a.activity_id} className="muted">
-            ✓ <Link to={`/ride/${a.activity_id}`}>{a.name || "Activity"}</Link> · {fmtMinutes(a.minutes)}{a.km ? ` · ${a.km} km` : ""}{a.load ? ` · load ${a.load}` : ""}
-          </div>
-        ))}
-        {canAdd ? (
-          open === `${d.day}:new`
-            ? <SessionEditor day={d.day} setup={setup} today={today} onClose={() => setOpen(null)} onChange={onChange} />
-            : <button className="link" onClick={() => setOpen(`${d.day}:new`)}>+ Add session</button>
-        ) : null}
-      </div>
-    </div>
+          ))}
+        </>
+      ) : null}
+      {editable && sessions.length < 2 ? (
+        adding
+          ? <><h3>New session</h3><SessionEditor day={d.day} setup={setup} today={today} onClose={onClose} onChange={onChange} /></>
+          : <p style={{ marginTop: 12 }}><Button variant="secondary" onClick={() => setAdding(true)}><Plus size={14} /> Add session</Button></p>
+      ) : null}
+    </DialogContent>
   );
 }
 
@@ -673,18 +755,18 @@ function SessionEditor({ session, day, setup, today, onClose, onChange }: {
         <label><input type="checkbox" checked={locked} onChange={(e) => setLocked(e.target.checked)} /> Lock</label>
       </div>
       <div className="row" style={{ marginTop: 8 }}>
-        <button onClick={save}>{session ? "Save" : "Add"}</button>
+        <Button onClick={save}>{session ? "Save" : "Add"}</Button>
         {session ? (
           <>
-            <button className="secondary" onClick={() => run(() => api(url, { method: "DELETE" }))}>Delete</button>
+            <Button variant="secondary" onClick={() => run(() => api(url, { method: "DELETE" }))}>Delete</Button>
             <label className="field">Move to
               <input type="date" min={today} value={moveTo} onChange={(e) => setMoveTo(e.target.value)} />
             </label>
-            <button className="secondary" disabled={!moveTo} onClick={() => run(() => api(`${url}/move`, { body: { to: moveTo } }))}>Move</button>
-            <button className="secondary" disabled={!!changed} title={changed ? "Save first" : undefined} onClick={showPreview}>Show workout</button>
+            <Button variant="secondary" disabled={!moveTo} onClick={() => run(() => api(`${url}/move`, { body: { to: moveTo } }))}>Move</Button>
+            <Button variant="secondary" disabled={!!changed} title={changed ? "Save first" : undefined} onClick={showPreview}>Show workout</Button>
           </>
         ) : null}
-        <button className="secondary" onClick={onClose}>Close</button>
+        <Button variant="secondary" onClick={onClose}>Close</Button>
       </div>
       <p className="muted">Locked sessions stay as they are when the plan is rebuilt or adjusted. Edited sessions are kept too.</p>
       {warnings.map((w) => <p key={w}><Banner kind="amber">{w}</Banner></p>)}
@@ -703,8 +785,7 @@ function SessionEditor({ session, day, setup, today, onClose, onChange }: {
 
 function LaterWeeks({ weeks }: { weeks: PlanWeek[] }) {
   return (
-    <section className="card">
-      <h2>Later weeks</h2>
+    <CollapsibleCard id="plan:later" title="Later weeks" defaultOpen={false}>
       <p className="muted">The sessions are filled in four weeks ahead, as the plan rolls forward. With a key, the AI coach plans each new
         week when you open this page.</p>
       <div className="scroll">
@@ -723,6 +804,6 @@ function LaterWeeks({ weeks }: { weeks: PlanWeek[] }) {
           </tbody>
         </table>
       </div>
-    </section>
+    </CollapsibleCard>
   );
 }

@@ -3,13 +3,14 @@ import {
 } from "recharts";
 import { Link } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { ActivityRow, Banner, ChartTooltip, Loading, Metric } from "../components";
+import { ActivityRow, Banner, ChartTooltip, CollapsibleCard, Loading, Metric } from "../components";
 import { api, query, useFetch } from "../api";
 import { ZONE_COLORS, daysAgo, fmt, fmtDuration, withOption } from "../lib";
 import { SPORTS, TIME_OPTIONS, useWorkout, type Sport } from "../workout";
 import { useSync } from "../sync";
 import { GymExercise, GymInfo, GymSession, MuscleStrip } from "./GymSession";
 import { WorkoutChart, WorkoutStep, stepTarget } from "./WorkoutChart";
+import { Button } from "@/ui/button";
 
 const HRV = "#1e88e5";
 const SPORT_LABEL: Record<Sport, string> = { cycling: "Cycling", running: "Running", swimming: "Swimming", gym: "Gym" };
@@ -49,30 +50,42 @@ export interface PlanToday {
 
 const planMinutes = (m: number) => Math.min(600, Math.max(20, m));
 
-export function useHomeData(minutes: number, sport: Sport) {
+export function useHomeData(minutes: number, sport: Sport, asPlanned = false) {
   const { gymFocus } = useWorkout();
-  return useFetch<HomeData>(`/home${query({ minutes, sport, focus: sport === "gym" && gymFocus !== "auto" ? gymFocus : null })}`);
+  return useFetch<HomeData>(`/home${query({ minutes, sport, focus: sport === "gym" && gymFocus !== "auto" ? gymFocus : null, as_planned: asPlanned ? 1 : null })}`);
 }
 
 const signed = (v: number, digits = 0) => `${v >= 0 ? "+" : ""}${v.toFixed(digits)}`;
 
 export function Home() {
   const { minutes, setMinutes, sport, setSport, override } = useWorkout();
-  const { data, error, loading, reload } = useHomeData(minutes, sport);
+  // "Do the planned session anyway": ignore today's readiness downgrade. Remembered for the rest of the day in this tab.
+  const asKey = `home_as_planned:${daysAgo(0)}`;
+  const [asPlanned, setAsPlannedState] = useState(() => { try { return sessionStorage.getItem(asKey) === "1"; } catch { return false; } });
+  const setAsPlanned = (v: boolean) => {
+    setAsPlannedState(v);
+    try { if (v) sessionStorage.setItem(asKey, "1"); else sessionStorage.removeItem(asKey); } catch { /* not remembered */ }
+  };
+  const { data, error, loading, reload } = useHomeData(minutes, sport, asPlanned);
 
-  // Once a day, open Home on today's planned sport and length. After that the athlete's own choice sticks.
+  // Home shows today's planned session by default. "Suggest another workout" switches to picking a sport and time;
+  // the choice is remembered for the rest of the day in this tab.
+  const modeKey = `home_mode:${daysAgo(0)}`;
+  const [mode, setModeState] = useState<"plan" | "other">(() => {
+    try { return sessionStorage.getItem(modeKey) === "other" ? "other" : "plan"; } catch { return "plan"; }
+  });
+  const setMode = (m: "plan" | "other") => {
+    setModeState(m);
+    try { sessionStorage.setItem(modeKey, m); } catch { /* not remembered */ }
+  };
   const plan = data?.plan_today;
+  const planned = !!plan && plan.planned.kind !== "rest" && SPORTS.includes(plan.sport as Sport);
+  const showingPlan = planned && mode === "plan" && !override; // a coach workout accepted today wins
   useEffect(() => {
-    if (!data || !plan || plan.sport === "rest" || !SPORTS.includes(plan.sport as Sport)) return;
-    const key = `plan_applied:${data.today}`;
-    try {
-      if (sessionStorage.getItem(key)) return;
-      sessionStorage.setItem(key, "1");
-    } catch { return; }
-    if (override) return; // a coach workout accepted today wins
+    if (!plan || !showingPlan) return;
     if (plan.sport !== sport) setSport(plan.sport as Sport);
-    if (plan.planned.minutes !== minutes) setMinutes(planMinutes(plan.planned.minutes));
-  }, [data, plan]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (plan.planned.minutes !== minutes && planMinutes(plan.planned.minutes) !== minutes) setMinutes(planMinutes(plan.planned.minutes));
+  }, [plan, showingPlan, sport, minutes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!data) return <Loading error={error} loading={loading} />;
   return (
@@ -84,7 +97,7 @@ export function Home() {
         </Banner></p>
       ) : null}
       {data.ftp_hint ? <FtpHint hint={data.ftp_hint} onUpdated={reload} /> : null}
-      <Today d={data} minutes={minutes} setMinutes={setMinutes} sport={sport} setSport={setSport} />
+      <Today d={data} minutes={minutes} setMinutes={setMinutes} sport={sport} setSport={setSport} showingPlan={showingPlan} setMode={setMode} asPlanned={asPlanned} setAsPlanned={setAsPlanned} />
       <RecoverySummary d={data} />
     </>
   );
@@ -107,10 +120,12 @@ function FtpHint({ hint, onUpdated }: { hint: { estimate: number; current: numbe
   return (
     <p>
       <Banner kind="info">
-        Your best 20-minute power in the last 90 days suggests an FTP of about {hint.estimate} W (set: {hint.current} W).{" "}
-        <button onClick={update}>Update FTP</button>{" "}
-        <button className="secondary" onClick={() => { localStorage.setItem(key, "1"); setHidden(true); }}>Dismiss</button>
-        {error ? <> · {error}</> : null}
+        Your best 20-minute power in the last 90 days suggests an FTP of about {hint.estimate} W (set: {hint.current} W).
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button onClick={update}>Update FTP</Button>
+          <Button variant="secondary" onClick={() => { localStorage.setItem(key, "1"); setHidden(true); }}>Dismiss</Button>
+          {error ? <span className="text-bad">{error}</span> : null}
+        </div>
       </Banner>
     </p>
   );
@@ -135,18 +150,20 @@ function SendToWatch({ name, sport, steps, exercises }: { name: string; sport: S
     }
   };
   return (
-    <p className="row">
-      <button className="secondary" disabled={state.busy} onClick={send}>{state.busy ? "Sending…" : "Send to watch"}</button>
+    <div className="mb-2 flex flex-col items-start gap-2">
+      <Button variant="secondary" disabled={state.busy} onClick={send}>{state.busy ? "Sending…" : "Send to watch"}</Button>
       {state.ok ? <span className="muted">{state.ok}</span> : null}
-      {state.error ? <span style={{ color: "var(--bad)" }}>{state.error}</span> : null}
-    </p>
+      {state.error ? <span className="text-sm text-bad">{state.error}</span> : null}
+    </div>
   );
 }
 
-function Today({ d, minutes, setMinutes, sport, setSport }: {
+function Today({ d, minutes, setMinutes, sport, setSport, showingPlan, setMode, asPlanned, setAsPlanned }: {
   d: HomeData; minutes: number; setMinutes: (m: number) => void; sport: Sport; setSport: (s: Sport) => void;
+  showingPlan: boolean; setMode: (m: "plan" | "other") => void; asPlanned: boolean; setAsPlanned: (v: boolean) => void;
 }) {
   const p = d.plan_today;
+  const rest = !!p && p.planned.kind === "rest";
   const options = withOption(TIME_OPTIONS[sport], p && p.planned.sport === sport ? planMinutes(p.planned.minutes) : null);
   const level = d.levels[sport];
   const { override, clearOverride, gymFocus, setGymFocus } = useWorkout();
@@ -156,13 +173,12 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
   const t = d.today_row;
   const date = new Date(d.today + "T12:00:00").toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
   return (
-    <section className="card">
-      <h2>Today · {date}</h2>
+    <CollapsibleCard id="home:today" title={<>Today · {date}</>}>
       {!d.has_wellness ? <Banner kind="info">No recovery data yet. Press “Sync from Garmin” to download HRV, sleep and resting HR.</Banner>
         : !r.has_today_data ? (
           <Banner kind="info">
-            Last night's recovery isn't synced yet. Open Garmin Connect on your phone so the watch uploads, then{" "}
-            <button className="secondary" disabled={sync.busy} onClick={() => sync.run()}>{sync.busy ? "Syncing…" : "Sync now"}</button>
+            Last night's recovery isn't synced yet. Open Garmin Connect on your phone so the watch uploads, then sync.
+            <div className="mt-3"><Button variant="secondary" disabled={sync.busy} onClick={() => sync.run()}>{sync.busy ? "Syncing…" : "Sync now"}</Button></div>
           </Banner>
         ) : null}
       <p><Banner kind={r.level}>Readiness {r.score}/100 · {r.headline}</Banner></p>
@@ -184,10 +200,27 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
         <p className="muted">Each caution costs 15 points and each bad signal 35. 75+ is green, 45–74 amber, below 45 red. Set your own HRV range in Settings.</p>
       </details>
 
-      {p ? <PlanLine p={p} sport={sport} minutes={minutes} setSport={setSport} setMinutes={setMinutes} /> : null}
-      <h3>{override ? "Coach's workout" : w.steps.length || w.exercises?.length ? "Suggested workout" : "Suggestion"} · {w.name}</h3>
-      {override ? <p><Banner kind="info">You accepted this workout from the coach. <button className="secondary" onClick={clearOverride}>Back to suggested workout</button></Banner></p> : null}
-      <div className="row">
+      {p ? <PlanLine p={p} showingPlan={showingPlan} /> : null}
+      {showingPlan && p?.changed && p.reason ? (
+        <p><Banner kind="amber">
+          {asPlanned ? <>Showing the planned session as written: <b>{p.planned.label}</b>. {p.reason.replace(/, so .*/, ".")} Be ready to cut it short.</>
+            : <>Planned: <b>{p.planned.label}</b>. {p.reason}</>}
+          <div className="mt-3">
+            <Button variant="secondary" size="sm" onClick={() => setAsPlanned(!asPlanned)}>
+              {asPlanned ? "Back to the adjusted workout" : "Do the planned session anyway"}
+            </Button>
+          </div>
+        </Banner></p>
+      ) : null}
+      <div className="card-head">
+        <h3>{override ? "Coach's workout" : showingPlan ? (p?.changed && !asPlanned ? "Today's workout, adjusted for readiness" : "Today's planned workout") : w.steps.length || w.exercises?.length ? "Suggested workout" : "Suggestion"} · {w.name}</h3>
+        {showingPlan ? <Button variant="secondary" size="sm" onClick={() => setMode("other")}>Suggest another workout</Button> : null}
+        {!showingPlan && p && !rest && !override ? (
+          <Button variant="secondary" size="sm" onClick={() => setMode("plan")}>Back to planned workout</Button>
+        ) : null}
+      </div>
+      {override ? <p><Banner kind="info">You accepted this workout from the coach. <Button variant="secondary" onClick={clearOverride}>Back to suggested workout</Button></Banner></p> : null}
+      {!showingPlan ? <div className="row">
         <label className="field">Sport today
           <select value={sport} onChange={(e) => setSport(e.target.value as Sport)}>
             {SPORTS.map((x) => <option key={x} value={x}>{SPORT_LABEL[x]}</option>)}
@@ -201,18 +234,18 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
             </select>
           </label>
         ) : null}
-      </div>
-      <details>
+      </div> : null}
+      {!showingPlan ? <details>
         <summary>Level: {level.level} {sport} ({level.source === "set" ? "set in Settings" : "estimated"})</summary>
         <ul>{level.reasons.map((x) => <li key={x}>{x}</li>)}</ul>
         <p className="muted">
           Readiness and form use all your sports. The level picks how hard and long the {sport} session is. Change it in Settings if it is wrong.
         </p>
-      </details>
-      <label className="field" style={{ maxWidth: 280 }}>Time available: {minutes} min
+      </details> : null}
+      {!showingPlan ? <label className="field" style={{ maxWidth: 280 }}>Time available: {minutes} min
         <input type="range" min={0} max={options.length - 1} value={Math.max(options.indexOf(minutes), 0)}
           onChange={(e) => setMinutes(options[Number(e.target.value)])} />
-      </label>
+      </label> : null}
       <p className="muted">{w.purpose}{w.steps.length || w.exercises?.length ? ` · about ${w.minutes} min` : ""}</p>
       {w.rationale[0] ? <p className="muted">{w.rationale[0]}</p> : null}
       {sport === "gym" && d.gym ? <MuscleStrip gym={d.gym} /> : null}
@@ -233,29 +266,19 @@ function Today({ d, minutes, setMinutes, sport, setSport }: {
       {(sport === "gym" ? w.exercises?.length : w.steps.length)
         ? <SendToWatch key={`${sport}:${w.name}:${w.minutes}`} name={w.name} sport={sport} steps={w.steps} exercises={w.exercises} />
         : null}
-    </section>
+    </CollapsibleCard>
   );
 }
 
 /** "Plan: Threshold ride, 1 h 15 · today Endurance, because readiness is amber", with a shortcut back to the plan. */
-function PlanLine({ p, sport, minutes, setSport, setMinutes }: {
-  p: PlanToday; sport: Sport; minutes: number; setSport: (s: Sport) => void; setMinutes: (m: number) => void;
-}) {
+function PlanLine({ p, showingPlan }: { p: PlanToday; showingPlan: boolean }) {
   const rest = p.planned.kind === "rest";
-  const follows = p.used && minutes === planMinutes(p.planned.minutes);
-  const canFollow = !rest && SPORTS.includes(p.planned.sport as Sport) && !follows;
   return (
     <p className="muted">
-      <Link to="/plan">Plan</Link>: <b>{p.planned.label}</b>
+      <Link to="/plan">Plan</Link>: <b>{rest ? "Rest day" : p.planned.label}</b>
       {p.others.length ? ` (+ ${p.others.map((o) => o.label).join(", ")})` : ""}
-      {p.changed && p.reason ? <> · {p.reason}</> : null}
-      {canFollow ? (
-        <> · <button className="link" onClick={() => {
-          if (p.planned.sport !== sport) setSport(p.planned.sport as Sport);
-          setMinutes(planMinutes(p.planned.minutes));
-        }}>Use the planned session</button></>
-      ) : null}
-      {!p.used && !rest && p.planned.sport === sport ? " · you picked a different session" : ""}
+      {!showingPlan && p.changed && p.reason ? <> · {p.reason}</> : null}
+      {rest ? " · pick a workout below if you want to train anyway" : !showingPlan ? " · showing a different workout" : ""}
     </p>
   );
 }
@@ -270,11 +293,7 @@ function RecoverySummary({ d }: { d: HomeData }) {
   const hasHrv = rows.some((w) => w.hrv_avg !== null);
   const r = d.readiness;
   return (
-    <section className="card">
-      <div className="card-head">
-        <h2>Recovery · last 30 days</h2>
-        <Link to="/trends">View trends →</Link>
-      </div>
+    <CollapsibleCard id="home:recovery" title="Recovery · last 30 days" aside={<Link to="/trends">View trends →</Link>}>
       {!hasHrv ? <Banner kind="info">No HRV data in this range yet.</Banner> : (
         <ResponsiveContainer width="100%" height={70}>
           <ComposedChart data={data}>
@@ -293,7 +312,7 @@ function RecoverySummary({ d }: { d: HomeData }) {
         {d.today_row?.hrv_avg ? `HRV ${fmt(d.today_row.hrv_avg)} ms` : "No HRV today"}
         {r.hrv_range ? ` · range ${r.hrv_range[0].toFixed(0)}–${r.hrv_range[1].toFixed(0)}` : ""}
       </p>
-    </section>
+    </CollapsibleCard>
   );
 }
 
@@ -309,8 +328,7 @@ export function Week({ d }: { d: HomeData }) {
   ];
   const start = new Date(w.week_start + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
   return (
-    <section className="card">
-      <h2>This week · {d.sport} since {start}</h2>
+    <CollapsibleCard id="home:week" title={<>This week · {d.sport} since {start}</>}>
       <div className="grid">
         <Metric label="Hours" value={w.hours.toFixed(1)} sub={`${signed(w.hours - w.avg_hours, 1)} vs 4-wk avg`} />
         {d.sport === "gym" ? null : <Metric label="Distance" value={`${fmt(w.distance_km)} km`} />}
@@ -331,7 +349,7 @@ export function Week({ d }: { d: HomeData }) {
           ? <p><Banner kind="amber">Fitness (all sports) rose {d.ramp.toFixed(1)} points in 7 days. Ramping this fast raises injury and illness risk.</Banner></p>
           : <p className="muted">Ramp rate: fitness (all sports) {signed(d.ramp, 1)} in the last 7 days (keep it under {d.ramp_warning}).</p>
       ) : null}
-    </section>
+    </CollapsibleCard>
   );
 }
 
@@ -339,8 +357,7 @@ export function Records({ d }: { d: HomeData }) {
   const y = d.year;
   const expected = y.goal ? (y.goal * y.days_elapsed) / y.days_in_year : null;
   return (
-    <section className="card">
-      <h2>Records and milestones</h2>
+    <CollapsibleCard id="home:records" title="Records and milestones">
       {d.sport !== "cycling" ? null : d.power_prs.length ? (
         <>
           <b>New power bests in the last 4 weeks</b>
@@ -372,6 +389,6 @@ export function Records({ d }: { d: HomeData }) {
           </ResponsiveContainer>
         </>
       ) : null}
-    </section>
+    </CollapsibleCard>
   );
 }
