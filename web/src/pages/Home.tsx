@@ -80,7 +80,9 @@ export function Home() {
   };
   const plan = data?.plan_today;
   const planned = !!plan && plan.planned.kind !== "rest" && SPORTS.includes(plan.sport as Sport);
-  const showingPlan = planned && mode === "plan" && !override; // a coach workout accepted today wins
+  const showingPlan = planned && mode === "plan" && !override;
+  // A rest day (planned, or forced by today's recovery) shows no workout until the athlete asks for one.
+  const restDay = !!plan && plan.kind === "rest" && mode === "plan" && !override; // a coach workout accepted today wins
   useEffect(() => {
     if (!plan || !showingPlan) return;
     if (plan.sport !== sport) setSport(plan.sport as Sport);
@@ -97,7 +99,7 @@ export function Home() {
         </Banner></p>
       ) : null}
       {data.ftp_hint ? <FtpHint hint={data.ftp_hint} onUpdated={reload} /> : null}
-      <Today d={data} minutes={minutes} setMinutes={setMinutes} sport={sport} setSport={setSport} showingPlan={showingPlan} setMode={setMode} asPlanned={asPlanned} setAsPlanned={setAsPlanned} />
+      <Today d={data} minutes={minutes} setMinutes={setMinutes} sport={sport} setSport={setSport} showingPlan={showingPlan} restDay={restDay} setMode={setMode} asPlanned={asPlanned} setAsPlanned={setAsPlanned} />
       <RecoverySummary d={data} />
     </>
   );
@@ -158,12 +160,11 @@ function SendToWatch({ name, sport, steps, exercises }: { name: string; sport: S
   );
 }
 
-function Today({ d, minutes, setMinutes, sport, setSport, showingPlan, setMode, asPlanned, setAsPlanned }: {
+function Today({ d, minutes, setMinutes, sport, setSport, showingPlan, restDay, setMode, asPlanned, setAsPlanned }: {
   d: HomeData; minutes: number; setMinutes: (m: number) => void; sport: Sport; setSport: (s: Sport) => void;
-  showingPlan: boolean; setMode: (m: "plan" | "other") => void; asPlanned: boolean; setAsPlanned: (v: boolean) => void;
+  showingPlan: boolean; restDay: boolean; setMode: (m: "plan" | "other") => void; asPlanned: boolean; setAsPlanned: (v: boolean) => void;
 }) {
   const p = d.plan_today;
-  const rest = !!p && p.planned.kind === "rest";
   const options = withOption(TIME_OPTIONS[sport], p && p.planned.sport === sport ? planMinutes(p.planned.minutes) : null);
   const level = d.levels[sport];
   const { override, clearOverride, gymFocus, setGymFocus } = useWorkout();
@@ -212,11 +213,18 @@ function Today({ d, minutes, setMinutes, sport, setSport, showingPlan, setMode, 
           </div>
         </Banner></p>
       ) : null}
+      {restDay ? (
+        <div className="mt-2 flex flex-col items-start gap-3">
+          <p style={{ margin: 0 }}>😴 <b>Rest day.</b> {p?.changed && p.reason ? p.reason : "Nothing is planned today."}</p>
+          <Button variant="secondary" onClick={() => setMode("other")}>Suggest a workout anyway</Button>
+        </div>
+      ) : (
+        <>
       <div className="card-head">
         <h3>{override ? "Coach's workout" : showingPlan ? (p?.changed && !asPlanned ? "Today's workout, adjusted for readiness" : "Today's planned workout") : w.steps.length || w.exercises?.length ? "Suggested workout" : "Suggestion"} · {w.name}</h3>
         {showingPlan ? <Button variant="secondary" size="sm" onClick={() => setMode("other")}>Suggest another workout</Button> : null}
-        {!showingPlan && p && !rest && !override ? (
-          <Button variant="secondary" size="sm" onClick={() => setMode("plan")}>Back to planned workout</Button>
+        {!showingPlan && p && !override ? (
+          <Button variant="secondary" size="sm" onClick={() => setMode("plan")}>{p.kind === "rest" ? "Back to rest day" : "Back to planned workout"}</Button>
         ) : null}
       </div>
       {override ? <p><Banner kind="info">You accepted this workout from the coach. <Button variant="secondary" onClick={clearOverride}>Back to suggested workout</Button></Banner></p> : null}
@@ -266,6 +274,8 @@ function Today({ d, minutes, setMinutes, sport, setSport, showingPlan, setMode, 
       {(sport === "gym" ? w.exercises?.length : w.steps.length)
         ? <SendToWatch key={`${sport}:${w.name}:${w.minutes}`} name={w.name} sport={sport} steps={w.steps} exercises={w.exercises} />
         : null}
+        </>
+      )}
     </CollapsibleCard>
   );
 }
