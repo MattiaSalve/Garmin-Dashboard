@@ -41,6 +41,7 @@ button.danger { background: var(--bad); color: #fff; }
 button:disabled { opacity: 0.5; cursor: default; }
 input, select { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; max-width: 100%; }
 label.field { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+label.field textarea { width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; color: inherit; resize: vertical; }
 .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
 .pills { display: inline-flex; gap: 4px; }
 .pills button { background: transparent; color: var(--muted); border: 1px solid var(--line); padding: 4px 10px; }

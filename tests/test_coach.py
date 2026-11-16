@@ -142,6 +142,33 @@ def test_loose_cycling_steps_and_clear_errors():
         coach.ask_coach(payload(), post=lambda b, k: reply("   "), api_key="k")
 
 
+GOOD = json.dumps({"summary": "Easy day.", "agree_with_suggestion": True})
+
+
+def test_empty_reply_is_retried_once_with_less_reasoning_after_a_length_stop():
+    bodies = []
+
+    def post(body, key):
+        bodies.append(body)
+        return reply(None, "length") if len(bodies) == 1 else reply(GOOD)
+
+    assert coach.ask_coach(payload(), post=post, api_key="k").summary == "Easy day."
+    assert "reasoning" not in bodies[0] and bodies[1]["reasoning"] == {"effort": "low"}
+
+    bodies.clear()
+    with pytest.raises(coach.CoachError, match="thinking"):
+        coach.ask_coach(payload(), post=lambda b, k: bodies.append(b) or reply("", "length"), api_key="k")
+    assert len(bodies) == 2
+
+
+def test_errors_inside_a_200_response_are_reported():
+    with pytest.raises(coach.CoachError, match="provider failed .Upstream timeout"):
+        coach.ask_coach(payload(), post=lambda b, k: {"error": {"code": 502, "message": "Upstream timeout"}}, api_key="k")
+    mid = {"choices": [{"finish_reason": "error", "error": {"message": "overloaded"}, "message": {"content": ""}}]}
+    with pytest.raises(coach.CoachError, match="overloaded"):
+        coach.ask_coach(payload(), post=lambda b, k: mid, api_key="k")
+
+
 def test_plan_block_is_sent_and_plan_changes_are_parsed_forgivingly():
     r = Readiness("green", 90, [], "h", (96, 124), True)
     p = coach.build_payload(r, suggest(r, 60, INTENSITY, date(2026, 11, 8)), WELLNESS, INTENSITY, 0.0, 252,
@@ -161,3 +188,34 @@ def test_plan_block_is_sent_and_plan_changes_are_parsed_forgivingly():
     assert (b.slot, b.sport, b.kind) == (0, "rest", "rest")
     assert (c.sport, c.kind) == ("gym", "full")
     assert coach.CoachAdvice.model_validate({"summary": "x", "agree_with_suggestion": True}).plan_changes is None
+
+
+def test_ask_plan_sends_the_brief_and_reads_a_loose_plan():
+    seen = {}
+    messy = '```json\n{"summary": "Build up.", "weeks": [{"week_start": "2026-11-16", "phase": "Build", "hours": "6.5 h", "note": null}],' \
+            ' "sessions": [{"day": "2026-11-17", "slot": "0", "sport": "Bike", "kind": "Sweet spot", "minutes": "75 min"}]}\n```'
+
+    def post(body, key):
+        seen["body"] = body
+        return reply(messy)
+
+    plan = coach.ask_plan({"today": "2026-11-13"}, post=post, api_key="k")
+    assert json.loads(seen["body"]["messages"][1]["content"]) == {"today": "2026-11-13"}
+    assert seen["body"]["max_tokens"] == coach.PLAN_MAX_TOKENS
+    (w,), (s,) = plan.weeks, plan.sessions
+    assert (w.phase, w.hours, w.note) == ("build", 6.5, "") and (s.sport, s.kind, s.minutes) == ("cycling", "sweet_spot", 75)
+    assert coach.AIPlan.model_validate({"summary": "x", "weeks": None, "sessions": None}).sessions == []
+
+
+def test_ask_plan_reads_gym_exercises_loosely():
+    body = {"summary": "s", "weeks": [], "sessions": [
+        {"day": "2026-11-18", "sport": "gym", "kind": "Lower body", "minutes": 50,
+         "exercises": [{"name": "Pistol squat", "group": "quads", "sets": "4", "reps": 6, "rpe": "10 (failure)", "rest_s": "150 s"},
+                       None, {"name": ""}]},
+        {"day": "2026-11-19", "sport": "cycling", "kind": "endurance", "minutes": 60, "exercises": "none"}]}
+    plan = coach.ask_plan({}, post=lambda b, k: reply(json.dumps(body)), api_key="k")
+    g, ride = plan.sessions
+    (e,) = g.exercises
+    assert (g.kind, e.group, e.sets, e.reps, e.rpe, e.rest_s) == ("lower", "legs", 4, "6", 10, 150)
+    assert ride.exercises is None
+    assert "gym_setup" in coach.PLAN_SYSTEM

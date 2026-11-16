@@ -117,7 +117,9 @@ def test_every_mapping_is_a_real_garmin_exercise():
 
 
 def test_every_app_exercise_has_a_specific_garmin_exercise():
-    for e in (e for s in (*gym.CANDIDATES, gym.MOBILITY) for e in s.exercises):
+    library = [e for s in (*gym.CANDIDATES, gym.MOBILITY) for e in s.exercises]
+    substitutes = [gym.Exercise(name, e.group, e.kind, 3) for e in library for _, name, _ in gym.SUBSTITUTES.get(e.name, ())]
+    for e in library + substitutes:
         category, exercise = garmin_exercise(e.name, e.group)
         # Back in gym.last_trained, the session must count for the same muscle group, and mobility for none.
         if e.group == "mobility":

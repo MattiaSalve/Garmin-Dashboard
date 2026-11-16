@@ -10,7 +10,7 @@ depends on three things:
 """
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 
 from garmin_dashboards.readiness import Readiness
@@ -146,6 +146,148 @@ REST_SESSION = Session(
     note="No lifting today. Walking, stretching, food and an early night all help.",
 )
 CANDIDATES = (LOWER, UPPER, FULL, CORE)
+
+# ------------------------------------------------------------------ equipment and effort
+
+# What the athlete trains with. "full_gym" means everything; otherwise bodyweight plus the items listed.
+EQUIPMENT = {
+    "full_gym": "Full gym",
+    "pullup_bar": "Pull-up bar",
+    "rings": "Gymnastic rings",
+    "box": "Box or bench",
+    "dumbbells": "Dumbbells",
+    "kettlebell": "Kettlebell",
+    "barbell": "Barbell and rack",
+    "bands": "Resistance bands",
+}
+EFFORTS = {
+    "standard": "Leave a rep or two in reserve",
+    "failure": "To failure: really hard sessions",
+}
+DEFAULT_EQUIPMENT = ("full_gym",)
+DEFAULT_EFFORT = "standard"
+
+
+@dataclass(frozen=True)
+class Kit:
+    """The athlete's strength setup: what equipment there is and how hard the sets go."""
+    equipment: frozenset[str] = frozenset(DEFAULT_EQUIPMENT)
+    effort: str = DEFAULT_EFFORT
+
+    @property
+    def full_gym(self) -> bool:
+        return "full_gym" in self.equipment
+
+    def labels(self) -> list[str]:
+        if self.full_gym:
+            return [EQUIPMENT["full_gym"]]
+        return [EQUIPMENT[k] for k in EQUIPMENT if k in self.equipment] or ["Bodyweight only"]
+
+
+FULL_KIT = Kit()
+
+
+def kit_from_dict(raw: dict | None) -> Kit:
+    """A Kit from the stored athlete profile; unknown items are dropped."""
+    raw = raw if isinstance(raw, dict) else {}
+    items = raw.get("equipment")
+    equipment = frozenset(k for k in items if k in EQUIPMENT) if isinstance(items, list) else frozenset(DEFAULT_EQUIPMENT)
+    effort = raw.get("effort") if raw.get("effort") in EFFORTS else DEFAULT_EFFORT
+    return Kit(equipment, effort)
+
+
+# What each library exercise becomes without a full gym: (needs any of these items, name, note), first match wins.
+# An empty tuple needs nothing but bodyweight, so every list ends with one.
+HARDER = "Pick the variation that makes the top of the rep range hard."
+SUBSTITUTES: dict[str, tuple[tuple[tuple[str, ...], str, str], ...]] = {
+    "Goblet or back squat": (
+        (("barbell",), "Back squat", ""),
+        (("dumbbells", "kettlebell"), "Goblet squat", ""),
+        ((), "Pistol squat progression (each leg)", "Squat to a box or hold the rings or a door frame until you own the full depth."),
+    ),
+    "Romanian deadlift": (
+        (("barbell",), "Romanian deadlift", "Hinge at the hips, flat back."),
+        (("dumbbells", "kettlebell"), "Single-leg Romanian deadlift (each leg)", "Hinge at the hips, flat back."),
+        (("rings",), "Ring leg curl", "Rings low, heels in the straps, hips up; curl the heels in."),
+        ((), "Nordic hamstring curl (feet anchored)", "Lower as slowly as you can; push back up with your hands."),
+    ),
+    "Split squat or step-up (each leg)": (
+        (("box",), "Bulgarian split squat, rear foot on the box (each leg)", ""),
+        (("dumbbells", "kettlebell"), "Dumbbell split squat (each leg)", ""),
+        ((), "Reverse lunge (each leg)", ""),
+    ),
+    "Hip thrust or glute bridge": (
+        (("barbell",), "Barbell hip thrust", ""),
+        (("box",), "Single-leg hip thrust, shoulders on the box (each leg)", ""),
+        ((), "Single-leg glute bridge (each leg)", ""),
+    ),
+    "Calf raise": (
+        (("box",), "Single-leg calf raise on the box edge (each leg)", ""),
+        ((), "Single-leg calf raise (each leg)", ""),
+    ),
+    "Bench press or push-up": (
+        (("barbell",), "Bench press", ""),
+        (("dumbbells",), "Dumbbell bench press", ""),
+        (("rings",), "Ring push-up", "Feet raised to make it harder. " + HARDER),
+        (("box",), "Feet-elevated push-up (feet on the box)", HARDER),
+        ((), "Push-up", "Archer or feet-raised push-ups when plain ones get easy. " + HARDER),
+    ),
+    "Row (dumbbell, cable or bar)": (
+        (("rings",), "Ring row", "Walk the feet forward (or raise them) to make it harder."),
+        (("barbell",), "Barbell row", ""),
+        (("dumbbells", "kettlebell"), "One-arm dumbbell row (each arm)", ""),
+        (("bands",), "Band row", ""),
+        ((), "Inverted row under a sturdy table", ""),
+    ),
+    "Overhead press": (
+        (("barbell",), "Overhead press", ""),
+        (("dumbbells", "kettlebell"), "Dumbbell overhead press", ""),
+        (("box",), "Pike push-up, feet on the box", HARDER),
+        ((), "Pike push-up", HARDER),
+    ),
+    "Lat pulldown or pull-up": (
+        (("pullup_bar",), "Pull-up", "Add a slow lowering, a pause at the top, or weight in a backpack when the reps get easy."),
+        (("rings",), "Ring pull-up", "Add a slow lowering when the reps get easy."),
+        (("bands",), "Band pulldown", ""),
+        ((), "Inverted row under a table, underhand grip", ""),
+    ),
+    "Face pull or rear-delt raise": (
+        (("rings",), "Ring face pull", ""),
+        (("bands",), "Band face pull", ""),
+        (("dumbbells",), "Rear-delt raise", ""),
+        ((), "Prone rear-delt raise (Y-T-W)", ""),
+    ),
+    "Triceps extension": (
+        (("dumbbells",), "Dumbbell overhead triceps extension", ""),
+        (("rings",), "Ring dip", "Lower under control; use bands or your feet for help if you can't do the reps."),
+        (("box",), "Box dip", ""),
+        (("bands",), "Band triceps pushdown", ""),
+        ((), "Diamond push-up", ""),
+    ),
+    "Pallof press": (
+        (("bands",), "Band Pallof press", ""),
+        (("pullup_bar", "rings"), "Hanging knee raise", "Straight legs (hanging leg raise) when knees get easy."),
+        ((), "Plank shoulder tap", ""),
+    ),
+    "Back extension": (
+        ((), "Superman hold", ""),
+    ),
+}
+
+
+# Substitutes counted in reps where the library exercise they replace is a timed hold.
+REPS_OVERRIDE = {"Hanging knee raise": "8–12", "Plank shoulder tap": "10–16"}
+
+
+def adapt(e: Exercise, kit: Kit) -> Exercise:
+    """The exercise as it can be done with the athlete's equipment."""
+    if kit.full_gym or e.name not in SUBSTITUTES:
+        return e
+    for needs, name, note in SUBSTITUTES[e.name]:
+        if not needs or kit.equipment & set(needs):
+            return replace(e, name=name, note=note)
+    return e
+
 FOCUS = {s.key: s for s in CANDIDATES}  # what the athlete can ask to train today
 FOCUS_LABEL = {"lower": "Legs", "upper": "Upper body", "full": "Full body", "core": "Core"}
 
@@ -218,8 +360,10 @@ def assess_level(setting: float | None, sessions_12w: int) -> dict:
 # ------------------------------------------------------------------ picking and sizing a session
 
 
-def _row(e: Exercise, goal: str, level: str, trim: bool) -> dict:
+def _row(e: Exercise, goal: str, level: str, trim: bool, kit: Kit = FULL_KIT) -> dict:
+    e = adapt(e, kit)
     reps, rpe, rest = SCHEMES[goal][e.kind]
+    reps = REPS_OVERRIDE.get(e.name, reps)
     sets = e.sets
     if level == "beginner":
         sets, rpe = max(2, sets - 1), rpe - 1 if e.kind != "mobility" else rpe
@@ -228,7 +372,16 @@ def _row(e: Exercise, goal: str, level: str, trim: bool) -> dict:
     if trim and e.kind != "mobility":  # amber: a little less volume and effort
         sets, rpe = max(2, sets - 1), max(5, rpe - 1)
     note = e.note
-    if goal == "endurance" and e.kind in ("compound", "accessory"):
+    if kit.effort == "failure" and e.kind in ("compound", "accessory"):
+        rest += 30  # sets to failure need a little longer to recover
+        if trim:  # amber, or muscles not fully recovered: one rep short today
+            rpe, extra = 9, "One rep short of failure today."
+        elif level == "beginner":
+            rpe, extra = 9, "Last set to failure, the others one rep short."
+        else:
+            rpe, extra = 10, "Every set to failure: stop when the next rep would break your form."
+        note = (note + " " if note else "") + extra
+    elif goal == "endurance" and e.kind in ("compound", "accessory"):
         note = (note + " " if note else "") + "Stop about 2 reps before failure so you aren't sore for your next ride or run."
     return {"name": e.name, "group": e.group, "sets": sets, "reps": reps, "rpe": rpe, "rest_s": rest, "note": note}
 
@@ -237,14 +390,14 @@ def _minutes(row: dict) -> float:
     return row["sets"] * (45 + row["rest_s"]) / 60 + 1  # a set takes about 45 s; a minute to set up
 
 
-def _fit(session: Session, goal: str, level: str, minutes: int, trim: bool) -> list[dict]:
+def _fit(session: Session, goal: str, level: str, minutes: int, trim: bool, kit: Kit = FULL_KIT) -> list[dict]:
     """The session's exercises in priority order, as many as fit the time (at least 2, within the level's limit)."""
     warmup = 0 if session.key == "mobility" else WARMUP_MIN
     budget = minutes - warmup
     rows: list[dict] = []
     used = 0.0
     for e in session.exercises:
-        row = _row(e, goal, level, trim)
+        row = _row(e, goal, level, trim, kit)
         if len(rows) >= LEVEL_MAX_EXERCISES[level] or (len(rows) >= 2 and used + _minutes(row) > budget):
             break
         rows.append(row)
@@ -254,7 +407,7 @@ def _fit(session: Session, goal: str, level: str, minutes: int, trim: bool) -> l
 
 def suggest(
     readiness: Readiness, minutes: int, intensity: list[dict], trained: dict, today: date,
-    goal: str = DEFAULT_GOAL, level: str = DEFAULT_LEVEL, focus: str | None = None,
+    goal: str = DEFAULT_GOAL, level: str = DEFAULT_LEVEL, focus: str | None = None, kit: Kit = FULL_KIT,
 ) -> GymSuggestion:
     """Pick and size today's gym session for an athlete with this goal and level.
 
@@ -262,6 +415,7 @@ def suggest(
     so a hard ride yesterday keeps today's session away from heavy leg work.
     `focus` is a session the athlete asked for (a FOCUS key). It is honoured unless readiness calls for rest
     or mobility, and the rationale warns when the muscles aren't recovered; the volume is then trimmed.
+    `kit` swaps exercises for ones the athlete's equipment allows and sets how hard the sets go.
     """
     days = trained["days"]
     why = [readiness.headline]
@@ -278,11 +432,11 @@ def suggest(
         why.append("Recovery comes first: mobility and easy movement only.")
         minutes = min(minutes, RED_CAP_MINUTES)
         session = MOBILITY
-        return GymSuggestion(session, _fit(session, goal, level, minutes, False), why, _total(session, goal, level, minutes, False), level, goal, trained)
+        return GymSuggestion(session, _fit(session, goal, level, minutes, False, kit), why, _total(session, goal, level, minutes, False, kit), level, goal, trained)
 
     if focus == MOBILITY.key:
         why.append("Mobility, as planned: easy movement to keep you supple without adding fatigue.")
-        return GymSuggestion(MOBILITY, _fit(MOBILITY, goal, level, minutes, False), why, _total(MOBILITY, goal, level, minutes, False), level, goal, trained)
+        return GymSuggestion(MOBILITY, _fit(MOBILITY, goal, level, minutes, False, kit), why, _total(MOBILITY, goal, level, minutes, False, kit), level, goal, trained)
 
     amber = readiness.level == "amber"
     since_hard = days_since_hard(intensity, today)
@@ -307,7 +461,7 @@ def suggest(
             why.append("Part of this was trained very recently, so the volume and effort are trimmed.")
         if amber:
             why.append("Amber readiness: a little less volume and effort.")
-        return GymSuggestion(best, _fit(best, goal, level, minutes, trim), why, _total(best, goal, level, minutes, trim), level, goal, trained)
+        return GymSuggestion(best, _fit(best, goal, level, minutes, trim, kit), why, _total(best, goal, level, minutes, trim, kit), level, goal, trained)
 
     best, best_score = None, 0.0
     for s in CANDIDATES:
@@ -327,11 +481,11 @@ def suggest(
         why.append(_why_session(best, days, goal))
     if amber and best is not MOBILITY:
         why.append("Amber readiness: same exercises with a little less volume and effort.")
-    return GymSuggestion(best, _fit(best, goal, level, minutes, amber), why, _total(best, goal, level, minutes, amber), level, goal, trained)
+    return GymSuggestion(best, _fit(best, goal, level, minutes, amber, kit), why, _total(best, goal, level, minutes, amber, kit), level, goal, trained)
 
 
-def _total(session: Session, goal: str, level: str, minutes: int, trim: bool) -> int:
-    rows = _fit(session, goal, level, minutes, trim)
+def _total(session: Session, goal: str, level: str, minutes: int, trim: bool, kit: Kit = FULL_KIT) -> int:
+    rows = _fit(session, goal, level, minutes, trim, kit)
     return round((0 if session.key == "mobility" else WARMUP_MIN) + sum(_minutes(r) for r in rows))
 
 

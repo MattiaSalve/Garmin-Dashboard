@@ -109,6 +109,9 @@ STREAK_DAYS, STREAK_MIN = 3, 2  # amber or red on 2 of the last 3 days
 STREAK_WINDOW = 4
 STREAK_LONG_TRIM = 0.8
 
+AI_SOURCE = "ai"  # sessions the AI plan builder wrote
+BUILDER_SOURCES = ("auto", AI_SOURCE)  # sessions a rebuild may replace (unless locked)
+
 LONG_NAME = {"cycling": "Long ride", "running": "Long run", "swimming": "Long swim"}
 
 # What the athlete can pick for each sport in the day editor.
@@ -152,9 +155,10 @@ class PlanDay:
     kind: str
     minutes: int
     planned_load: float = 0.0
-    source: str = "auto"  # auto (rebuilt on regenerate) | user | coach | adjusted (an applied proposal)
+    source: str = "auto"  # auto / ai (rebuilt on regenerate) | user | coach | adjusted (an applied proposal)
     locked: bool = False
     note: str = ""
+    exercises: list[dict] | None = None  # gym only: the AI's exercises ({name, group, sets, reps, rpe, rest_s, note})
 
 
 @dataclass
@@ -646,18 +650,30 @@ def distribute_week(
     return sorted(sessions, key=lambda p: (p.day, p.slot))
 
 
+def event_day(goal: Goal | None, primary: str | None, today: date, week_start: date, fixed: list[PlanDay]) -> PlanDay | None:
+    """The event itself as a plan row, when it falls in this week and isn't in the plan yet."""
+    event = goal_date(goal)
+    if not event or goal.kind != "event" or event < today or monday(event) != week_start:
+        return None
+    if any(p.day == event.isoformat() for p in fixed):
+        return None
+    return PlanDay(event.isoformat(), 0, goal.sport or primary or "cycling", "event",
+                   round((goal.target or 0) * 60), 0.0, note=goal.name or "Event")
+
+
 def build_plan(
     today: date, ctl: float, profile: Profile, goals: list[Goal], levels: dict[str, str], rates: dict,
     recent_hours: float, overrides: dict[str, float] | None = None, existing: list[PlanDay] = (),
     done: dict[str, dict] | None = None, gym_goal: str = gym.DEFAULT_GOAL, only_empty_weeks: bool = False,
-    horizon: int = HORIZON_WEEKS,
+    horizon: int = HORIZON_WEEKS, fill_weeks: set[date] | None = None,
 ) -> tuple[list[WeekTarget], list[PlanDay]]:
     """Week targets from this week up to the event (at least `horizon` weeks), and the new auto sessions for
     the first `horizon` weeks.
 
-    Existing sessions that aren't plain auto ones (edited, locked, coach, applied proposals, kept rest days)
-    and everything before today are kept; the caller replaces the remaining auto sessions with the result.
-    With `only_empty_weeks`, weeks that already hold any session are left as they are (topping up the plan).
+    Existing sessions that aren't plain auto or AI-built ones (edited, locked, coach, applied proposals, kept
+    rest days) and everything before today are kept; the caller replaces the remaining auto and AI sessions with
+    the result. With `only_empty_weeks`, weeks that already hold any session are left as they are (topping up the
+    plan); with `fill_weeks`, only those weeks get sessions (the caller clears just those).
     """
     goal = goals[0] if goals else None
     overrides = overrides or {}
@@ -670,8 +686,10 @@ def build_plan(
     anchor = _d(profile.start) if profile.start else week0
     primary = _primary(profile, goal)
     level = levels.get(primary, "intermediate") if primary else levels.get(gym.KEY, "intermediate")
-    kept = [p for p in existing if p.source != "auto" or p.locked or p.day < today.isoformat()]
+    kept = [p for p in existing if p.source not in BUILDER_SOURCES or p.locked or p.day < today.isoformat()]
     busy_weeks = {monday(_d(p.day)) for p in existing} if only_empty_weeks else set()
+    if fill_weeks is not None:
+        busy_weeks |= {week0 + timedelta(weeks=i) for i in range(horizon)} - set(fill_weeks)
     blended = (0.75 * rates[primary]["easy"] + 0.25 * rates[primary]["moderate"]) if primary else rates[gym.KEY]["moderate"]
 
     weeks, new_days = [], []
@@ -702,9 +720,8 @@ def build_plan(
         past_load = sum(v.get("load", 0) for d, v in done.items() if ws.isoformat() <= d < today.isoformat())
         if i < horizon and ws not in busy_weeks:
             week_fixed = [p for p in kept if in_week(p)]
-            if event and phase == "race" and goal.kind == "event" and event >= today and not any(p.day == event.isoformat() for p in week_fixed):
-                event_row = PlanDay(event.isoformat(), 0, goal.sport or primary or "cycling", "event",
-                                    round((goal.target or 0) * 60), 0.0, note=goal.name or "Event")
+            event_row = event_day(goal, primary, today, ws, week_fixed) if phase == "race" else None
+            if event_row:
                 week_fixed.append(event_row)
                 new_days.append(event_row)
             added = distribute_week(target, profile, goal, levels, rates, today, week_fixed, done, gym_goal)
@@ -1100,6 +1117,336 @@ def coach_changes(
     return sorted(out.values(), key=lambda c: (c["day"], c["slot"])), skipped
 
 
+# ------------------------------------------------------------------ AI-built plan
+#
+# The AI designs the plan (phases, weekly hours, every session). The rules only enforce hard limits on what it
+# returns: the athlete's available time, a session-length cap per sport and level, and the fitness-ramp cap.
+
+AI_RECENT_WEEKS = 8
+AI_NOTE_MAX = 200
+AI_HOURS_TOLERANCE = 1.05  # a plan may run 5 % over the week's available time before it is trimmed
+GYM_CAP = 90
+
+
+@dataclass
+class AIPlanResult:
+    rows: list[PlanDay]                    # sessions to save (source "ai"), including the event row
+    weeks: dict[str, dict]                 # week_start -> {phase, hours, note}
+    adjusted: list[str] = field(default_factory=list)  # what the limits changed
+    skipped: list[str] = field(default_factory=list)   # sessions left out, and why
+
+
+def session_cap(sport: str, kind: str, level: str) -> int:
+    """Longest session the limits allow: hard intervals are capped shorter than steady sessions."""
+    if sport == gym.KEY:
+        return GYM_CAP
+    if KIND_CLASS.get(kind) == "hard":
+        return HARD_CAP[sport]
+    return LONG_CAP[sport][level]
+
+
+def ramp_cap(ctl: float) -> float:
+    """Most load a week may hold: the load that raises fitness by RAMP_WARNING points."""
+    return round(7 * (max(ctl, 0) + LOAD_PER_RAMP_POINT * RAMP_WARNING))
+
+
+def plan_end(today: date, goals: list[Goal], horizon: int = HORIZON_WEEKS) -> date:
+    """Monday of the last week the plan's week targets cover: the goal's week, or the horizon without one."""
+    week0 = monday(today)
+    event = goal_date(goals[0] if goals else None)
+    weeks = horizon
+    if event and event >= week0:
+        weeks = max(horizon, min(MAX_WEEKS, (monday(event) - week0).days // 7 + 1))
+    return week0 + timedelta(weeks=weeks - 1)
+
+
+def recent_weeks(activities: list[dict], today: date, n: int = AI_RECENT_WEEKS) -> list[dict]:
+    """The last `n` full weeks: hours and load per week, hours per sport and the number of hard sessions."""
+    week0 = monday(today)
+    out = []
+    for back in range(n, 0, -1):
+        ws = week0 - timedelta(weeks=back)
+        we = (ws + timedelta(days=6)).isoformat()
+        rows = [a for a in activities if ws.isoformat() <= a["day"] <= we and plan_sport(a.get("sport_type"))]
+        by_sport: Counter = Counter()
+        for a in rows:
+            by_sport[plan_sport(a["sport_type"])] += a["minutes"] or 0
+        out.append({
+            "week_start": ws.isoformat(), "sessions": len(rows),
+            "hours": round(sum(a["minutes"] or 0 for a in rows) / 60, 1),
+            "load": round(sum(a["load"] or 0 for a in rows)),
+            "hours_by_sport": {s: round(m / 60, 1) for s, m in by_sport.items()},
+            "hard_sessions": sum(1 for a in rows if activity_class(a.get("hard_min") or 0, a["minutes"] or 0) == "hard"),
+        })
+    return out
+
+
+def _available(profile: Profile, overrides: dict[str, float], ws: date) -> float:
+    return min(profile.hours_per_week, overrides.get(ws.isoformat(), math.inf))
+
+
+def _stays(p: PlanDay, today: date, fill: set[date]) -> bool:
+    """Whether an existing row survives a rebuild of the `fill` weeks."""
+    return monday(_d(p.day)) not in fill or p.source not in BUILDER_SOURCES or p.locked or p.day < today.isoformat()
+
+
+def _row_out(p: PlanDay) -> dict:
+    return {"day": p.day, "weekday": WEEKDAYS[_d(p.day).weekday()], "slot": p.slot, "sport": p.sport, "kind": p.kind,
+            "minutes": p.minutes}
+
+
+def ai_request(
+    today: date, profile: Profile, goals: list[Goal], levels: dict[str, str], gym_goal_label: str,
+    ctl: float, form: float | None, rates: dict, recent: list[dict], wellness: list[dict],
+    readiness_levels: dict[str, str], existing: list[PlanDay], done: dict[str, dict],
+    overrides: dict[str, float], fill: set[date], previous_weeks: dict[str, dict] | None = None,
+    goals_text: str = "", kit: gym.Kit = gym.FULL_KIT,
+) -> dict:
+    """What the AI plan builder gets: identifier-free (no goal names, activity names, places or account details).
+
+    `existing` holds the plan from this Monday on; `fill` the weeks to write sessions for; `done` the days of this
+    week already trained, as {day: {minutes, load, sports}}.
+    """
+    week0 = monday(today)
+    end = plan_end(today, goals)
+    fixed, around = [], []
+    for p in sorted(existing, key=lambda p: (p.day, p.slot)):
+        if p.day < today.isoformat() or not _stays(p, today, fill):
+            continue
+        row = _row_out(p)
+        if monday(_d(p.day)) in fill:
+            row["why"] = ("kept free by the athlete" if p.kind == "rest" else "the goal event" if p.kind == "event"
+                          else "locked" if p.locked else "set by the athlete")
+            fixed.append(row)
+        elif p.kind != "rest":
+            around.append(row)
+
+    def goal_out(g: Goal) -> dict:
+        when = goal_date(g)
+        return {"kind": g.kind, "sport": g.sport, "date": g.date, "target": g.target,
+                "weeks_to_go": None if when is None else round((when - today).days / 7, 1)}
+
+    keep = ("day", "hrv_avg", "rhr", "sleep_score", "sleep_s")
+    weeks_out = [week0 + timedelta(weeks=i) for i in range((end - week0).days // 7 + 1)]
+    return {
+        "today": today.isoformat(), "weekday": WEEKDAYS[today.weekday()],
+        "weeks_to_plan": sorted(w.isoformat() for w in fill),
+        "targets_until": end.isoformat(),
+        "goals": [goal_out(g) for g in goals],
+        "athlete_goals": goals_text.strip()[:1000] or None,
+        "profile": {
+            "sports": {s: round(v, 2) for s, v in profile.shares().items()},
+            "hours_per_week": profile.hours_per_week, "sessions_per_week": profile.sessions_per_week,
+            "preferred_long_day": WEEKDAYS[profile.long_day],
+        },
+        "hours_available": {w.isoformat(): _available(profile, overrides, w) for w in weeks_out
+                            if w.isoformat() in overrides},
+        "athlete_levels": levels,
+        "gym_goal": gym_goal_label if gym.KEY in profile.shares() else None,
+        "gym_setup": {"equipment": kit.labels(), "effort": gym.EFFORTS[kit.effort]} if gym.KEY in profile.shares() else None,
+        "fitness": {"ctl": round(ctl, 1), "form_tsb": None if form is None else round(form, 1)},
+        "load_per_hour": rates,
+        "kind_intensity": {k: KIND_CLASS[k] for k in KIND_CLASS if k != "event"},
+        "recent_weeks": recent,
+        "done_this_week": [{"day": d, "minutes": round(v.get("minutes", 0)), "load": round(v.get("load", 0)),
+                            "sports": {s: round(m) for s, m in (v.get("sports") or {}).items()}}
+                           for d, v in sorted(done.items()) if week0.isoformat() <= d < today.isoformat()],
+        "recovery_last_7_days": [
+            {k: (round(r[k] / 3600, 1) if k == "sleep_s" and r.get(k) else r.get(k)) for k in keep} for r in wellness[-7:]
+        ],
+        "readiness_last_days": readiness_levels,
+        "fixed_sessions": fixed,
+        "already_planned_other_weeks": around,
+        "previous_week_targets": previous_weeks or {},
+        "kinds_by_sport": {s: [k for k in kinds] for s, kinds in KINDS_BY_SPORT.items() if s in profile.shares()},
+        "limits": {
+            "max_session_minutes": {
+                s: ({"any": GYM_CAP} if s == gym.KEY else
+                    {"hard_kinds": HARD_CAP[s], "other_kinds": LONG_CAP[s][levels.get(s, "intermediate")]})
+                for s in profile.shares()
+            },
+            "max_fitness_rise_per_week": RAMP_WARNING,
+            "max_load_this_week": ramp_cap(ctl),
+        },
+    }
+
+
+def _resize(p: PlanDay, factor: float, rates: dict) -> PlanDay:
+    m = int(max(MIN_MINUTES.get(p.sport, 20), 5 * math.floor(p.minutes * factor / 5)))
+    return replace(p, minutes=m, planned_load=planned_load(p.sport, p.kind, m, rates))
+
+
+def _key(p: PlanDay) -> tuple[str, int]:
+    return p.day, p.slot
+
+
+def _swap(rows: list[PlanDay], replaced: set, new: dict) -> list[PlanDay]:
+    """`rows` with the `replaced` keys swapped for their entry in `new` (dropped when it has none)."""
+    return [new[_key(p)] if _key(p) in replaced else p for p in rows if _key(p) not in replaced or _key(p) in new]
+
+
+def _week_label(ws: date) -> str:
+    return f"week of {ws.day} {ws.strftime('%b')}"
+
+
+AI_MAX_EXERCISES = 10
+EXERCISE_KEYS = ("name", "group", "sets", "reps", "rpe", "rest_s", "note")
+
+
+def _int(v, default: int, low: int, high: int) -> int:
+    try:
+        return min(high, max(low, int(v)))
+    except (TypeError, ValueError):
+        return default
+
+
+def ai_exercises(raw) -> list[dict] | None:
+    """The AI's exercises for a gym session, tidied (as coach.CoachExercise parsed them); None when there are none."""
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for e in raw[:AI_MAX_EXERCISES]:
+        if not isinstance(e, dict) or not str(e.get("name") or "").strip():
+            continue
+        out.append({
+            "name": str(e["name"]).strip()[:80], "group": e.get("group") if e.get("group") in (*gym.GROUPS, "mobility") else "legs",
+            "sets": _int(e.get("sets"), 3, 1, 10), "reps": str(e.get("reps") or "8–12")[:30],
+            "rpe": _int(e.get("rpe"), 7, 1, 10), "rest_s": _int(e.get("rest_s"), 60, 0, 600),
+            "note": str(e.get("note") or "").strip()[:160],
+        })
+    return out or None
+
+
+def check_ai_plan(
+    sessions: list[dict], weeks: list[dict], today: date, fill: set[date], existing: list[PlanDay],
+    done: dict[str, dict], profile: Profile, goals: list[Goal], levels: dict[str, str], rates: dict,
+    ctl: float, overrides: dict[str, float],
+) -> AIPlanResult:
+    """The AI's plan, made to fit the hard limits. Every change is reported in `adjusted` or `skipped`.
+
+    `sessions` are {day, slot, sport, kind, minutes, note}; `weeks` are {week_start, phase, hours, note}.
+    """
+    week0 = monday(today)
+    end = plan_end(today, goals)
+    shares = profile.shares()
+    goal = goals[0] if goals else None
+    staying = [p for p in existing if _stays(p, today, fill)]
+    adjusted, skipped = [], []
+
+    # Week targets: phases and hours from the AI, hours never above the time the athlete has.
+    targets: dict[str, dict] = {}
+    for w in weeks:
+        try:
+            ws = monday(_d(str(w.get("week_start") or "")))
+        except ValueError:
+            continue
+        if not week0 <= ws <= end:
+            continue
+        phase = str(w.get("phase") or "build").lower()
+        hours = max(0.0, float(w.get("hours") or 0))
+        available = _available(profile, overrides, ws)
+        if hours > available:
+            hours = available
+        targets[ws.isoformat()] = {"phase": phase if phase in PHASE_NOTE else "build", "hours": round(hours * 2) / 2,
+                                   "note": str(w.get("note") or "").strip()[:AI_NOTE_MAX]}
+
+    # Place each session on a free slot in the weeks being planned.
+    event = goal_date(goal) if goal and goal.kind == "event" else None
+    blocked = {event.isoformat(), (event - timedelta(days=1)).isoformat()} if event else set()
+    taken = {(p.day, p.slot) for p in staying}
+    kept_free = {p.day for p in staying if p.kind == "rest"}
+    rows: list[PlanDay] = []
+    def order(s):  # by day, the AI's slot 0 first, so the main slot fills first
+        return str(s.get("day") or ""), s.get("slot") not in (0, None)
+
+    for s in sorted(sessions, key=order):
+        day, sport, kind = str(s.get("day") or ""), s.get("sport") or "", s.get("kind") or ""
+        try:
+            d = _d(day)
+        except ValueError:
+            skipped.append(f"{day or 'A session'}: not a date.")
+            continue
+        if kind == "rest" or sport == "rest":
+            continue
+        if monday(d) not in fill or d < today:
+            skipped.append(f"{day}: outside the weeks being planned.")
+            continue
+        if sport not in shares:
+            skipped.append(f"{day}: {sport} isn't one of your sports.")
+            continue
+        minutes = int(round(float(s.get("minutes") or 0)))
+        problem = valid_session(sport, kind, max(minutes, 10))
+        if problem:
+            skipped.append(f"{day}: {problem}")
+            continue
+        if day in kept_free:
+            skipped.append(f"{day}: you keep that day free.")
+            continue
+        if day in blocked:
+            skipped.append(f"{day}: the event day and the day before stay free.")
+            continue
+        slot = next((x for x in (0, 1) if (day, x) not in taken), None)
+        if slot is None:
+            skipped.append(f"{day}: that day already has two sessions.")
+            continue
+        taken.add((day, slot))
+        level = levels.get(sport, "intermediate")
+        cap = session_cap(sport, kind, level)
+        low = MIN_MINUTES[sport]
+        if minutes > cap or minutes < low:
+            new = min(max(minutes, low), cap)
+            adjusted.append(f"{WEEKDAYS[d.weekday()]} {day}: {describe(sport, kind).lower()} set to {new} min "
+                            f"(from {minutes}; the limit for your level is {low}–{cap} min).")
+            minutes = new
+        note = str(s.get("note") or "").strip()[:AI_NOTE_MAX]
+        exercises = ai_exercises(s.get("exercises")) if sport == gym.KEY else None
+        rows.append(PlanDay(day, slot, sport, kind, minutes, planned_load(sport, kind, minutes, rates), AI_SOURCE,
+                            False, note, exercises))
+
+    # Week by week: within the available hours, then under the fitness-ramp cap.
+    last = max(fill) if fill else week0
+    ws = week0
+    while ws <= last:
+        we = ws + timedelta(days=6)
+        in_week = lambda p: ws.isoformat() <= p.day <= we.isoformat()  # noqa: E731
+        live = [p for p in staying if in_week(p) and p.day >= today.isoformat() and p.kind not in ("rest", "event")]
+        past = [v for d, v in done.items() if ws.isoformat() <= d < today.isoformat()]
+        if ws in fill:
+            event_row = event_day(goal, _primary(profile, goal), today, ws, staying + rows) if event else None
+            if event_row:
+                rows.append(replace(event_row, source=AI_SOURCE))
+            mine = [p for p in rows if in_week(p) and p.kind != "event"]
+            budget = _available(profile, overrides, ws) * 60 - sum(v.get("minutes", 0) for v in past) - sum(p.minutes for p in live)
+            total = sum(p.minutes for p in mine)
+            if mine and total > budget * AI_HOURS_TOLERANCE:
+                scaled = {_key(p): _resize(p, max(budget, 0) / total, rates) for p in mine}
+                # Still over with every session at its shortest: leave out the shortest ones.
+                for q in sorted(scaled.values(), key=lambda q: q.minutes):
+                    if sum(x.minutes for x in scaled.values()) <= budget * AI_HOURS_TOLERANCE:
+                        break
+                    del scaled[_key(q)]
+                    skipped.append(f"{q.day}: {describe(q.sport, q.kind).lower()} left out, no time left that week.")
+                rows = _swap(rows, {_key(p) for p in mine}, scaled)
+                adjusted.append(f"The {_week_label(ws)} was trimmed from {fmt_minutes(total)} to "
+                                f"{fmt_minutes(sum(q.minutes for q in scaled.values()))} to fit the time you have.")
+                mine = [p for p in rows if in_week(p) and p.kind != "event"]
+            cap = ramp_cap(ctl)
+            other = sum(v.get("load", 0) for v in past) + sum(p.planned_load for p in live)
+            load = sum(p.planned_load for p in mine)
+            if load and other + load > cap:
+                scaled = {_key(p): _resize(p, max(cap - other, 0) / load, rates) for p in mine}
+                rows = _swap(rows, set(scaled), scaled)
+                adjusted.append(f"The {_week_label(ws)} was shortened (load {other + load:.0f} → "
+                                f"{other + sum(q.planned_load for q in scaled.values()):.0f}) so fitness rises at most "
+                                f"{RAMP_WARNING} points a week.")
+            week_load = other + sum(p.planned_load for p in rows if in_week(p))
+        else:
+            week_load = sum(v.get("load", 0) for v in past) + sum(p.planned_load for p in live)
+        ctl = advance_fitness(ctl, week_load)
+        ws += timedelta(weeks=1)
+    return AIPlanResult(sorted(rows, key=lambda p: (p.day, p.slot)), targets, adjusted, skipped)
+
+
 # ------------------------------------------------------------------ today
 
 
@@ -1115,6 +1462,7 @@ def today_from_plan(sessions: list[PlanDay], readiness: Readiness, intensity: li
     p = main[0]
     planned = {"sport": p.sport, "kind": p.kind, "minutes": p.minutes, "label": describe(p.sport, p.kind, p.minutes)}
     out = {"planned": planned, "sport": p.sport, "kind": p.kind, "minutes": p.minutes, "changed": False, "reason": None,
+           "exercises": p.exercises,
            "others": [{"sport": o.sport, "kind": o.kind, "minutes": o.minutes, "label": describe(o.sport, o.kind, o.minutes)}
                       for o in main[1:]]}
     if p.kind in ("rest", "event"):
@@ -1136,9 +1484,10 @@ def today_from_plan(sessions: list[PlanDay], readiness: Readiness, intensity: li
 
 def plan_suggestion(
     today_plan: dict, readiness: Readiness, intensity: list[dict], trained: dict, today: date,
-    level: str, gym_goal: str = gym.DEFAULT_GOAL, minutes: int | None = None,
+    level: str, gym_goal: str = gym.DEFAULT_GOAL, minutes: int | None = None, kit: gym.Kit = gym.FULL_KIT,
 ) -> Suggestion | gym.GymSuggestion:
-    """The concrete workout (steps or exercises) for today's plan session. `minutes` overrides its length."""
+    """The concrete workout (steps or exercises) for today's plan session. `minutes` overrides its length.
+    A gym session the AI wrote exercises for uses them, unless today's readiness changed the session."""
     sport, kind = today_plan["sport"], today_plan["kind"]
     length = minutes or today_plan["minutes"]
     why = [readiness.headline, f"Today's plan: {today_plan['planned']['label']}."]
@@ -1147,7 +1496,9 @@ def plan_suggestion(
     if sport == gym.KEY:
         if kind == "rest":
             return gym.GymSuggestion(gym.REST_SESSION, [], why, 0, level, gym_goal, trained)
-        s = gym.suggest(readiness, length, intensity, trained, today, gym_goal, level, kind)
+        if today_plan.get("exercises") and not today_plan.get("changed"):
+            return _planned_gym(today_plan, readiness, why, length, level, gym_goal, trained)
+        s = gym.suggest(readiness, length, intensity, trained, today, gym_goal, level, kind, kit)
         s.rationale = why + s.rationale[1:]
         return s
     if kind == "rest":
@@ -1162,6 +1513,31 @@ def plan_suggestion(
         workout = replace(workout, key="long", name=LONG_NAME[sport],
                           purpose="Endurance for long days: steady, conversational and fuelled.")
     return Suggestion(workout, build(workout, length, profile), why, sport, level)
+
+
+def _planned_gym(today_plan: dict, readiness: Readiness, why: list[str], minutes: int, level: str, goal: str,
+                 trained: dict) -> gym.GymSuggestion:
+    """The AI's exercises for today's gym session, as many as fit the time (at least two). Amber readiness takes
+    a set off and keeps a rep or two in reserve."""
+    kind = today_plan["kind"]
+    base = gym.FOCUS.get(kind, gym.MOBILITY)
+    session = replace(base, note="")
+    amber = readiness.level == "amber"
+    warmup = 0 if kind == gym.MOBILITY.key else gym.WARMUP_MIN
+    rows, used = [], 0.0
+    for e in today_plan["exercises"]:
+        row = dict(e)
+        if amber and row["group"] != "mobility":
+            row.update(sets=max(2, row["sets"] - 1), rpe=max(5, min(row["rpe"], 9) - 1),
+                       note=(row["note"] + " " if row["note"] else "") + "Amber readiness: one set less, a rep or two in reserve.")
+        if len(rows) >= 2 and warmup + used + gym._minutes(row) > minutes:
+            break
+        rows.append(row)
+        used += gym._minutes(row)
+    why = [*why, "Exercises written by the AI coach for your equipment."]
+    if len(rows) < len(today_plan["exercises"]):
+        why.append(f"{len(rows)} of its {len(today_plan['exercises'])} exercises fit in {minutes} min.")
+    return gym.GymSuggestion(session, rows, why, round(warmup + used), level, goal, trained)
 
 
 def to_dict(obj) -> dict:

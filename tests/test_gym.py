@@ -117,3 +117,41 @@ def test_chosen_legs_after_a_hard_ride_are_trimmed_with_a_warning():
 def test_focus_does_not_override_a_red_day():
     s = gym.suggest(ready("red"), 60, [], NEVER, TODAY, focus="lower")
     assert s.session.key == "mobility"
+
+
+HOME_KIT = gym.Kit(frozenset({"pullup_bar", "rings", "box"}), "failure")
+
+
+def test_home_equipment_swaps_exercises_for_ones_it_allows():
+    lower = gym.suggest(ready("green"), 75, [], NEVER, TODAY, "strength", "intermediate", "lower", HOME_KIT)
+    upper = gym.suggest(ready("green"), 75, [], NEVER, TODAY, "strength", "intermediate", "upper", HOME_KIT)
+    names = [e["name"] for e in lower.exercises + upper.exercises]
+    assert "Pistol squat progression (each leg)" in names and "Ring row" in names and "Pull-up" in names
+    assert not any(w in n.lower() for n in names for w in ("barbell", "dumbbell", "band", "pulldown", "bench press"))
+
+
+def test_failure_effort_takes_working_sets_to_failure():
+    s = gym.suggest(ready("green"), 75, [], NEVER, TODAY, "strength", "intermediate", "upper", HOME_KIT)
+    assert all(e["rpe"] == 10 and "to failure" in e["note"] for e in s.exercises)
+    standard = gym.suggest(ready("green"), 75, [], NEVER, TODAY, "strength", "intermediate", "upper")
+    assert s.exercises[0]["rest_s"] == standard.exercises[0]["rest_s"] + 30
+    beginner = gym.suggest(ready("green"), 75, [], NEVER, TODAY, "strength", "beginner", "upper", HOME_KIT)
+    assert beginner.exercises[0]["rpe"] == 9 and "Last set to failure" in beginner.exercises[0]["note"]
+    amber = gym.suggest(ready("amber"), 60, [], NEVER, TODAY, "strength", "intermediate", "upper", HOME_KIT)
+    assert amber.exercises[0]["rpe"] == 9 and "One rep short" in amber.exercises[0]["note"]
+    endurance = gym.suggest(ready("green"), 60, [], NEVER, TODAY, "endurance", "intermediate", "lower", HOME_KIT)
+    assert "2 reps before failure" not in endurance.exercises[0]["note"]
+
+
+def test_kit_from_settings():
+    assert gym.kit_from_dict(None) == gym.FULL_KIT and gym.FULL_KIT.labels() == ["Full gym"]
+    kit = gym.kit_from_dict({"equipment": ["rings", "jetpack"], "effort": "bogus"})
+    assert kit == gym.Kit(frozenset({"rings"}), "standard") and kit.labels() == ["Gymnastic rings"]
+    assert gym.kit_from_dict({"equipment": [], "effort": "failure"}).labels() == ["Bodyweight only"]
+
+
+def test_substitutes_belong_to_library_exercises_and_end_with_a_bodyweight_option():
+    library = {e.name for s in (*gym.CANDIDATES, gym.MOBILITY) for e in s.exercises}
+    for name, options in gym.SUBSTITUTES.items():
+        assert name in library, name
+        assert not options[-1][0], f"{name} needs a bodyweight fallback"

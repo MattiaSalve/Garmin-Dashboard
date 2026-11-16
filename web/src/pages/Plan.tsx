@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, useFetch } from "../api";
 import { Banner, Loading } from "../components";
 import {
-  STATUS, changeLine, fmtMinutes, fmtPace, goalLine, parsePace, shortDay,
-  type DayStatus, type PlanChange, type PlanGoal,
+  STATUS, buildMessage, changeLine, fmtMinutes, fmtPace, goalLine, parsePace, shortDay,
+  type BuildResult, type DayStatus, type PlanChange, type PlanGoal,
 } from "../lib";
 import { loadKey } from "./Coach";
 import { GymSession, type GymExercise } from "./GymSession";
@@ -14,25 +14,32 @@ import { WorkoutChart, type WorkoutStep } from "./WorkoutChart";
 
 export interface PlanSession {
   day: string; slot: number; sport: string; kind: string; minutes: number; planned_load: number;
-  source: "auto" | "user" | "coach" | "adjusted"; locked: boolean; note: string; label: string;
+  source: "auto" | "ai" | "user" | "coach" | "adjusted"; locked: boolean; note: string; label: string;
 }
 interface DoneActivity { activity_id: number; name: string; sport: string; minutes: number; km: number; load: number }
 interface PlanDayView { day: string; status: DayStatus; sessions: PlanSession[]; activities: DoneActivity[] }
 interface PlanWeek {
   week_start: string; past: boolean; phase: string | null; note: string; target_hours: number | null; sessions: number | null;
   detailed: boolean; override_hours: number | null; planned_hours: number; planned_load: number; actual_hours: number;
-  actual_load: number; days: PlanDayView[];
+  actual_load: number; days: PlanDayView[]; builder: "ai" | "rules";
 }
 export interface Proposal {
   id: number; kind: string; reason: string; source: "rules" | "coach"; created: string;
   changes: (PlanChange & { after: { note?: string } | null })[];
 }
 interface Profile { sports: Record<string, number>; hours_per_week: number; sessions_per_week: number | null; long_day: number }
+interface Athlete { equipment: string[]; effort: string }
 interface Setup {
-  configured: boolean; profile: Profile; goals: PlanGoal[];
-  options: { sports: string[]; goal_kinds: string[]; weekdays: string[]; kinds: Record<string, string[]>; kind_labels: Record<string, string>; max_goals: number };
+  configured: boolean; profile: Profile; goals: PlanGoal[]; athlete: Athlete; about: string;
+  options: {
+    sports: string[]; goal_kinds: string[]; weekdays: string[]; kinds: Record<string, string[]>; kind_labels: Record<string, string>; max_goals: number;
+    equipment: Record<string, string>; efforts: Record<string, string>; about_max: number;
+  };
 }
-interface PlanView { setup: Setup; today: string; weeks: PlanWeek[]; proposals: Proposal[] }
+interface AIState { model: string | null; built: string | null; summary: string; topup_weeks: string[] }
+interface PlanView { setup: Setup; today: string; weeks: PlanWeek[]; proposals: Proposal[]; ai: AIState }
+type BuildMode = "all" | "topup" | "week";
+type Message = { kind: "error" | "info"; text: string; details?: string[] };
 
 const SPORT_LABEL: Record<string, string> = { cycling: "Cycling", running: "Running", swimming: "Swimming", gym: "Gym" };
 const GOAL_LABEL: Record<string, string> = {
@@ -43,17 +50,84 @@ const SOURCE_NOTE: Record<string, string> = { user: "edited by you", coach: "fro
 
 // ------------------------------------------------------------------ page
 
+const MODEL_KEY = "plan_model"; // the model chosen for building and reviewing the plan, remembered in this browser
+const TOPUP_KEY = (day: string) => `plan_ai_topup:${day}`; // the automatic AI top-up runs once a day per tab
+
+function useModel(): [string, (m: string) => void, string[]] {
+  const models = useFetch<{ models: string[]; default: string }>("/coach/models");
+  const [model, setModelState] = useState(() => { try { return localStorage.getItem(MODEL_KEY) ?? ""; } catch { return ""; } });
+  const setModel = (m: string) => {
+    setModelState(m);
+    try { if (m) localStorage.setItem(MODEL_KEY, m); else localStorage.removeItem(MODEL_KEY); } catch { /* not remembered */ }
+  };
+  return [model || models.data?.default || "", setModel, models.data?.models ?? []];
+}
+
+function ModelPicker({ model, setModel, models }: { model: string; setModel: (m: string) => void; models: string[] }) {
+  const listed = !model || models.includes(model);
+  const [other, setOther] = useState(!listed);
+  return (
+    <>
+      <label className="field" style={{ maxWidth: 320 }}>AI model
+        <select value={other ? "other" : model} onChange={(e) => {
+          if (e.target.value === "other") setOther(true); else { setOther(false); setModel(e.target.value); }
+        }}>
+          {models.map((m) => <option key={m}>{m}</option>)}
+          <option value="other">Other…</option>
+        </select>
+      </label>
+      {other ? (
+        <label className="field">Model id
+          <input value={listed ? "" : model} onChange={(e) => setModel(e.target.value.trim())} placeholder="provider/model-name" />
+        </label>
+      ) : null}
+    </>
+  );
+}
+
 export function Plan() {
   const { data, error, loading, reload } = useFetch<PlanView>("/plan");
   const [editingSetup, setEditingSetup] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<{ kind: "error" | "info"; text: string } | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [message, setMessage] = useState<Message | null>(null);
+  const [model, setModel, models] = useModel();
+  const key = loadKey();
+  const building = useRef(false);
+
+  /** Build with the AI coach (the server falls back to the rules without a key or when the AI fails). */
+  const build = async (mode: BuildMode, weekStart?: string) => {
+    if (building.current) return;
+    building.current = true;
+    setBusy(mode === "topup" ? "The AI coach is planning the coming weeks… this can take a minute or two."
+      : key ? "The AI coach is building your plan… this can take a minute or two." : "Rebuilding the plan…");
+    setMessage(null);
+    try {
+      const r = await api<BuildResult>("/plan/build", { body: { mode, week_start: weekStart ?? null, api_key: key || null, model: model || null } });
+      setMessage(buildMessage(r, mode));
+    } catch (e) {
+      setMessage({ kind: "error", text: (e as Error).message });
+    } finally {
+      building.current = false;
+      setBusy(null);
+      reload();
+    }
+  };
+
+  // Weekly top-up: the coming weeks the AI hasn't planned yet, once a day, only with a key (it lives in this browser).
+  const topup = data?.setup.configured && key ? data.ai.topup_weeks.length : 0;
+  useEffect(() => {
+    if (!topup || !data) return;
+    const flag = TOPUP_KEY(data.today);
+    try { if (sessionStorage.getItem(flag)) return; sessionStorage.setItem(flag, "1"); } catch { return; }
+    void build("topup");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topup, data?.today]);
 
   if (!data) return <Loading error={error} loading={loading} />;
   const { setup } = data;
 
   const act = async (fn: () => Promise<unknown>, done?: string) => {
-    setBusy(true);
+    setBusy("Working…");
     setMessage(null);
     try {
       await fn();
@@ -62,16 +136,17 @@ export function Plan() {
     } catch (e) {
       setMessage({ kind: "error", text: (e as Error).message });
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
   if (!setup.configured || editingSetup) {
     return (
-      <SetupCard setup={setup} today={data.today} onCancel={setup.configured ? () => setEditingSetup(false) : undefined}
-        onSaved={() => { setEditingSetup(false); reload(); }} />
+      <SetupCard setup={setup} today={data.today} aiReady={!!key} onCancel={setup.configured ? () => setEditingSetup(false) : undefined}
+        onSaved={() => { setEditingSetup(false); reload(); if (key) void build("all"); }} />
     );
   }
+  const ai = data.ai;
   const now = data.weeks.filter((w) => w.detailed);
   const later = data.weeks.filter((w) => !w.detailed);
   return (
@@ -91,17 +166,40 @@ export function Plan() {
           {setup.profile.sessions_per_week ? ` · ${setup.profile.sessions_per_week} sessions` : ""}
           {" · long session on "}{setup.options.weekdays[setup.profile.long_day]}
         </p>
+        {ai.summary ? (
+          <div className="ai-summary">
+            <p>{ai.summary}</p>
+            <p className="muted">Built by the AI coach{ai.model ? ` (${ai.model})` : ""}{ai.built ? ` on ${shortDay(ai.built)}` : ""}. Safety limits
+              (how fast fitness rises, session length, your hours) are checked on every session.</p>
+          </div>
+        ) : (
+          <p className="muted">
+            {key ? "This plan was built by the rules. Regenerate to let the AI coach build it."
+              : "This plan was built by the rules. Enter an OpenRouter key in Home → Ask coach to let the AI coach build it."}
+          </p>
+        )}
         <div className="row">
-          <button className="secondary" disabled={busy} title="Rebuild every automatic session from today on. Sessions you edited, locked or applied stay."
-            onClick={() => act(() => api("/plan/generate", { method: "POST" }), "Plan rebuilt. Your own sessions were kept.")}>Regenerate</button>
-          <button className="secondary" disabled={busy}
+          {key ? <ModelPicker model={model} setModel={setModel} models={models} /> : null}
+          <button className="secondary" disabled={!!busy}
+            title={key ? "The AI coach rebuilds every automatic session from today on. Sessions you edited, locked or applied stay."
+              : "Rebuild every automatic session from today on. Sessions you edited, locked or applied stay."}
+            onClick={() => build("all")}>Regenerate</button>
+          <button className="secondary" disabled={!!busy}
             onClick={() => { if (confirm("Delete the plan, its goals and every edit?")) act(() => api("/plan", { method: "DELETE" })); }}>Start over</button>
         </div>
-        {message ? <p><Banner kind={message.kind}>{message.text}</Banner></p> : null}
+        {busy ? <p><Banner kind="info">{busy}</Banner></p> : null}
+        {message ? (
+          <div><Banner kind={message.kind}>{message.text}
+            {message.details?.length ? <ul>{message.details.map((d, i) => <li key={i}>{d}</li>)}</ul> : null}
+          </Banner></div>
+        ) : null}
       </section>
       <Proposals proposals={data.proposals} onChange={reload} />
-      <Review onDone={reload} />
-      {now.map((w) => <WeekCard key={w.week_start} week={w} today={data.today} setup={setup} onChange={reload} />)}
+      <Review onDone={reload} model={model} />
+      {now.map((w) => (
+        <WeekCard key={w.week_start} week={w} today={data.today} setup={setup} onChange={reload}
+          onHoursSet={key ? (ws) => build("week", ws) : undefined} />
+      ))}
       {later.length ? <LaterWeeks weeks={later} /> : null}
     </>
   );
@@ -116,7 +214,9 @@ const toDraft = (g: PlanGoal): GoalDraft => ({
   target: g.target === null ? "" : g.kind === "performance" && g.sport !== "cycling" ? fmtPace(g.target) : String(g.target),
 });
 
-function SetupCard({ setup, today, onSaved, onCancel }: { setup: Setup; today: string; onSaved: () => void; onCancel?: () => void }) {
+function SetupCard({ setup, today, aiReady, onSaved, onCancel }: {
+  setup: Setup; today: string; aiReady: boolean; onSaved: () => void; onCancel?: () => void;
+}) {
   const o = setup.options;
   const [shares, setShares] = useState<Record<string, number>>(() =>
     Object.fromEntries(o.sports.map((s) => [s, Math.round((setup.profile.sports[s] ?? 0) * 100)])));
@@ -124,6 +224,9 @@ function SetupCard({ setup, today, onSaved, onCancel }: { setup: Setup; today: s
   const [sessions, setSessions] = useState(setup.profile.sessions_per_week ? String(setup.profile.sessions_per_week) : "");
   const [longDay, setLongDay] = useState(setup.profile.long_day);
   const [goals, setGoals] = useState<GoalDraft[]>(() => setup.goals.map(toDraft));
+  const [about, setAbout] = useState(setup.about ?? "");
+  const [equipment, setEquipment] = useState<string[]>(setup.athlete.equipment);
+  const [effort, setEffort] = useState(setup.athlete.effort);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const chosen = o.sports.filter((s) => shares[s] > 0);
@@ -156,6 +259,8 @@ function SetupCard({ setup, today, onSaved, onCancel }: { setup: Setup; today: s
             hours_per_week: Number(hours), sessions_per_week: sessions ? Number(sessions) : null, long_day: longDay,
           },
           goals: out,
+          athlete: { equipment, effort },
+          about,
         },
       });
       onSaved();
@@ -174,6 +279,8 @@ function SetupCard({ setup, today, onSaved, onCancel }: { setup: Setup; today: s
           Tell the app what you're training for and how much time you have. It builds a plan for the next weeks, places the
           sessions for you and suggests changes when your recovery or your real training differs from the plan. Nothing changes
           without your OK. These values are suggested from your last 12 weeks.
+          {aiReady ? " The AI coach designs the plan (phases, hours and every session) within safety limits; it sees numbers only, never goal names, places or account details."
+            : " Enter an OpenRouter key in Home → Ask coach and the AI coach designs the plan; without one, the built-in rules do."}
         </p>
       ) : null}
 
@@ -249,6 +356,14 @@ function SetupCard({ setup, today, onSaved, onCancel }: { setup: Setup; today: s
       ) : null}
       {!goals.length ? <p className="muted">No goal: the plan keeps a steady 3-weeks-on, 1-week-easier rhythm for general fitness.</p> : null}
 
+      <h3>About you and your setup</h3>
+      <label className="field">Anything the coach should know (background, injuries, days you can't train, how you like to train)
+        <textarea rows={3} maxLength={o.about_max} value={about} onChange={(e) => setAbout(e.target.value)}
+          placeholder="e.g. I train at home, not in a gym. I like short, very hard strength sessions. No running on consecutive days." />
+      </label>
+      <p className="muted">Sent to the AI coach as written (plan and Home coach), so leave out personal details.</p>
+      {shares.gym > 0 ? <StrengthSetup options={o} equipment={equipment} effort={effort} onEquipment={setEquipment} onEffort={setEffort} /> : null}
+
       {error ? <p><Banner kind="error">{error}</Banner></p> : null}
       <div className="row">
         <button disabled={busy || !chosen.length}>{busy ? "Building…" : setup.configured ? "Save and rebuild" : "Build my plan"}</button>
@@ -256,6 +371,49 @@ function SetupCard({ setup, today, onSaved, onCancel }: { setup: Setup; today: s
       </div>
       {setup.configured ? <p className="muted">Saving rebuilds the automatic sessions from today on. Sessions you edited, locked or applied stay.</p> : null}
     </form>
+  );
+}
+
+function StrengthSetup({ options, equipment, effort, onEquipment, onEffort }: {
+  options: Setup["options"]; equipment: string[]; effort: string; onEquipment: (e: string[]) => void; onEffort: (e: string) => void;
+}) {
+  const fullGym = equipment.includes("full_gym");
+  const items = Object.keys(options.equipment).filter((k) => k !== "full_gym");
+  const toggle = (k: string, on: boolean) => onEquipment(on ? [...equipment, k] : equipment.filter((x) => x !== k));
+  return (
+    <>
+      <h4>Strength equipment</h4>
+      <div className="row">
+        <label className="field"><span>
+          <input type="radio" name="gym-where" checked={fullGym} onChange={() => onEquipment(["full_gym"])} /> {options.equipment.full_gym}
+        </span></label>
+        <label className="field"><span>
+          <input type="radio" name="gym-where" checked={!fullGym} onChange={() => onEquipment([])} /> At home or outdoors, with…
+        </span></label>
+      </div>
+      {!fullGym ? (
+        <>
+          <div className="row">
+            {items.map((k) => (
+              <label key={k} className="field"><span>
+                <input type="checkbox" checked={equipment.includes(k)} onChange={(e) => toggle(k, e.target.checked)} /> {options.equipment[k]}
+              </span></label>
+            ))}
+          </div>
+          <p className="muted">{equipment.length ? "Gym sessions only use exercises you can do with these and your bodyweight."
+            : "Nothing ticked: bodyweight exercises only."}</p>
+        </>
+      ) : null}
+      <h4>How hard</h4>
+      <div className="row">
+        {Object.entries(options.efforts).map(([k, label]) => (
+          <label key={k} className="field"><span>
+            <input type="radio" name="gym-effort" checked={effort === k} onChange={() => onEffort(k)} /> {label}
+          </span></label>
+        ))}
+      </div>
+      {effort === "failure" ? <p className="muted">Working sets go to failure. Beginners, amber days and short sessions stop one rep short; red days get mobility instead.</p> : null}
+    </>
   );
 }
 
@@ -302,9 +460,7 @@ export function Proposals({ proposals, onChange }: { proposals: Proposal[]; onCh
 interface ReviewReply { summary: string; cautions: string[]; plan_proposal: Proposal | null; plan_skipped: string[] }
 
 /** Ask the AI coach to look over this week and next. Its changes arrive as a proposal above. */
-function Review({ onDone }: { onDone: () => void }) {
-  const models = useFetch<{ models: string[]; default: string }>("/coach/models");
-  const [model, setModel] = useState("");
+function Review({ onDone, model }: { onDone: () => void; model: string }) {
   const [message, setMessage] = useState("");
   const [reply, setReply] = useState<ReviewReply | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -317,7 +473,7 @@ function Review({ onDone }: { onDone: () => void }) {
     try {
       const r = await api<ReviewReply>("/plan/review", {
         body: {
-          api_key: key, model: model || models.data?.default || null,
+          api_key: key, model: model || null,
           history: message.trim() ? [{ role: "user", content: message.trim() }] : [],
         },
       });
@@ -337,13 +493,8 @@ function Review({ onDone }: { onDone: () => void }) {
         <p className="muted">
           The coach sees this week and next, how you followed the last two weeks, your recovery and your goals (no names, places or
           account details). Any changes it suggests appear above for you to apply or dismiss. Uses the OpenRouter key from the
-          “Ask coach” panel{key ? "" : " (none entered yet)"}.
+          “Ask coach” panel{key ? ` and the model chosen above (${model})` : " (none entered yet)"}.
         </p>
-        <label className="field" style={{ maxWidth: 320 }}>Model
-          <select value={model || models.data?.default || ""} onChange={(e) => setModel(e.target.value)}>
-            {models.data?.models.map((m) => <option key={m}>{m}</option>)}
-          </select>
-        </label>
         <label className="field">Anything to tell the coach? (optional)
           <textarea rows={2} maxLength={1000} value={message} onChange={(e) => setMessage(e.target.value)}
             placeholder="e.g. I can't train on Thursday next week, and I'd like a longer ride on Sunday instead of Saturday." />
@@ -365,7 +516,9 @@ function Review({ onDone }: { onDone: () => void }) {
 
 // ------------------------------------------------------------------ weeks and days
 
-function WeekCard({ week, today, setup, onChange }: { week: PlanWeek; today: string; setup: Setup; onChange: () => void }) {
+function WeekCard({ week, today, setup, onChange, onHoursSet }: {
+  week: PlanWeek; today: string; setup: Setup; onChange: () => void; onHoursSet?: (weekStart: string) => void;
+}) {
   const [open, setOpen] = useState<string | null>(null); // "day:slot", or "day:new" for a new session
   const [hours, setHours] = useState(week.override_hours === null ? "" : String(week.override_hours));
   const [error, setError] = useState<string | null>(null);
@@ -375,6 +528,7 @@ function WeekCard({ week, today, setup, onChange }: { week: PlanWeek; today: str
     try {
       await api(`/plan/week/${week.week_start}`, { method: "PUT", body: { hours: value } });
       onChange();
+      onHoursSet?.(week.week_start); // the rules resized it right away; the AI coach then replans it
     } catch (e) {
       setError((e as Error).message);
     }
@@ -384,7 +538,9 @@ function WeekCard({ week, today, setup, onChange }: { week: PlanWeek; today: str
     <section className="card">
       <div className="card-head">
         <h2>{thisWeek ? "This week" : week.past ? "Last week" : `Week of ${shortDay(week.week_start)}`}
-          {week.phase ? <span className="muted"> · {PHASE_LABEL[week.phase] ?? week.phase}</span> : null}</h2>
+          {week.phase ? <span className="muted"> · {PHASE_LABEL[week.phase] ?? week.phase}</span> : null}
+          {!week.past ? <span className="chip" title={week.builder === "ai" ? "Sessions written by the AI coach" : "Sessions written by the rules"}>
+            {" · "}{week.builder === "ai" ? "AI coach" : "rules"}</span> : null}</h2>
         <span className="muted">
           {week.past || thisWeek ? `${week.actual_hours.toFixed(1)} of ${week.planned_hours.toFixed(1)} h done` : `${week.planned_hours.toFixed(1)} h planned`}
           {" · load "}{week.past || thisWeek ? `${week.actual_load} / ` : ""}{week.planned_load}
@@ -549,10 +705,11 @@ function LaterWeeks({ weeks }: { weeks: PlanWeek[] }) {
   return (
     <section className="card">
       <h2>Later weeks</h2>
-      <p className="muted">The sessions are filled in four weeks ahead, as the plan rolls forward.</p>
+      <p className="muted">The sessions are filled in four weeks ahead, as the plan rolls forward. With a key, the AI coach plans each new
+        week when you open this page.</p>
       <div className="scroll">
         <table>
-          <thead><tr><th>Week of</th><th>Phase</th><th className="num">Hours</th><th className="num">Sessions</th></tr></thead>
+          <thead><tr><th>Week of</th><th>Phase</th><th className="num">Hours</th><th className="num">Sessions</th><th>Targets by</th></tr></thead>
           <tbody>
             {weeks.map((w) => (
               <tr key={w.week_start}>
@@ -560,6 +717,7 @@ function LaterWeeks({ weeks }: { weeks: PlanWeek[] }) {
                 <td>{w.phase ? PHASE_LABEL[w.phase] ?? w.phase : "–"}</td>
                 <td className="num">{w.target_hours?.toFixed(1) ?? "–"}{w.override_hours !== null ? " (set)" : ""}</td>
                 <td className="num">{w.sessions ?? "–"}</td>
+                <td>{w.builder === "ai" ? "AI coach" : "rules"}</td>
               </tr>
             ))}
           </tbody>

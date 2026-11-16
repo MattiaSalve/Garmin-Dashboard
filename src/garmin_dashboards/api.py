@@ -10,6 +10,7 @@ import threading
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
@@ -20,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from garmin_dashboards import auth, coach, garmin_workout, gym, plan
 from garmin_dashboards.db import (
-    add_proposal, all_settings, clear_plan, delete_plan_day, delete_setting, ensure_user_db, get_plan_days, get_proposal,
+    add_proposal, all_settings, clear_built_days, clear_plan, delete_plan_day, delete_setting, ensure_user_db, get_plan_days, get_proposal,
     get_proposals, get_text_setting, init_db, resolve, save_plan_days, set_proposal_status, set_setting, set_text_setting,
     settings_errors, text_settings_with_prefix,
 )
@@ -292,6 +293,7 @@ def _home_context(db: str, minutes: int, today: date, sport: str = "cycling", fo
     levels = _levels(db, settings, today, max(recent_fitness) if recent_fitness else None)
     trained = gym.last_trained(strength_sessions(today - timedelta(days=60), today, db), today)
     gym_goal = gym.goal_from_setting(settings.get("gym_goal"))
+    kit = _kit(db)
     # Today's planned session, after today's readiness check. It drives the workout when the athlete is
     # looking at the planned sport (and, for gym, hasn't picked a different focus).
     plan_today = plan.today_from_plan(_plan_rows(db, today, today), readiness, intensity, today)
@@ -299,16 +301,16 @@ def _home_context(db: str, minutes: int, today: date, sport: str = "cycling", fo
     if plan_today:
         plan_today["used"] = use_plan
     if use_plan:
-        suggestion = plan.plan_suggestion(plan_today, readiness, intensity, trained, today, levels[sport]["level"], gym_goal, minutes)
+        suggestion = plan.plan_suggestion(plan_today, readiness, intensity, trained, today, levels[sport]["level"], gym_goal, minutes, kit)
     elif sport == gym.KEY:
-        suggestion = gym.suggest(readiness, minutes, intensity, trained, today, gym_goal, levels[sport]["level"], focus)
+        suggestion = gym.suggest(readiness, minutes, intensity, trained, today, gym_goal, levels[sport]["level"], focus, kit)
     else:
         suggestion = suggest(readiness, minutes, intensity, today, sport, levels[sport]["level"])
     return {
         "sport": sport, "levels": levels, "trained": trained, "plan_today": plan_today,
         "today": today, "settings": settings, "wellness": wellness, "intensity": intensity,
         "series": series, "form": form, "readiness": readiness, "suggestion": suggestion,
-        "ftp": settings.get("ftp_w") or DEFAULT_FTP,
+        "ftp": settings.get("ftp_w") or DEFAULT_FTP, "kit": kit,
     }
 
 
@@ -456,7 +458,8 @@ def _coach_payload(db: str, today: date, minutes: int, sport: str, focus: str | 
         threshold_pace_s=s.get(SPORTS[sport].pace_setting) if sport in SPORTS and SPORTS[sport].pace_setting else None,
         pace_unit=SPORTS[sport].pace_unit if sport in SPORTS else "",
         # Always sent, so the coach can propose a gym workout when the athlete asks for one from another sport.
-        gym={"goal_label": gym.GOAL_LABEL[gym.goal_from_setting(s.get("gym_goal"))], "days_since": c["trained"]["days"]},
+        gym={"goal_label": gym.GOAL_LABEL[gym.goal_from_setting(s.get("gym_goal"))], "days_since": c["trained"]["days"],
+             "equipment": c["kit"].labels(), "effort": gym.EFFORTS[c["kit"].effort]},
         plan=_coach_plan_block(db, today),
     )
 
@@ -483,6 +486,8 @@ def ask_coach(
 # ------------------------------------------------------------------ training plan
 
 PROFILE_KEY, PLAN_GOALS_KEY, WEEK_HOURS_PREFIX = "training_profile", "training_goals", "week_hours:"
+AI_PLAN_KEY = "ai_plan"  # JSON: what the AI plan builder last wrote (see _ai_state)
+ATHLETE_KEY = "athlete_profile"  # JSON: {equipment: [gym.EQUIPMENT keys], effort: gym.EFFORTS key}
 PLAN_PAST_WEEKS = 1  # weeks before this one shown on the Plan page, to compare plan and reality
 RATE_HISTORY_DAYS = 180
 
@@ -493,6 +498,11 @@ def _json_setting(db: str, key: str, default):
         return json.loads(raw) if raw else default
     except ValueError:
         return default
+
+
+def _kit(db: str) -> gym.Kit:
+    """The athlete's strength setup (equipment and effort); a full gym and normal effort until they say otherwise."""
+    return gym.kit_from_dict(_json_setting(db, ATHLETE_KEY, None))
 
 
 def _plan_setup(db: str) -> tuple[plan.Profile | None, list[plan.Goal]]:
@@ -554,8 +564,41 @@ def _plan_rows(db: str, start: date | str, end: date | str) -> list[plan.PlanDay
 FAR = "9999-12-31"
 
 
-def _build(db: str, today: date, only_empty_weeks: bool, profile=None, goals=None, inputs=None):
-    """Week targets and the new sessions build_plan makes for this user, saved to the database."""
+def _ai_state(db: str) -> dict:
+    """What the AI plan builder last wrote: {model, built, summary, weeks: {monday: {phase, hours, note}},
+    detailed: [mondays whose sessions it wrote]}."""
+    raw = _json_setting(db, AI_PLAN_KEY, {})
+    raw = raw if isinstance(raw, dict) else {}
+    return {"model": raw.get("model"), "built": raw.get("built"), "summary": raw.get("summary") or "",
+            "weeks": raw.get("weeks") if isinstance(raw.get("weeks"), dict) else {},
+            "detailed": [w for w in raw.get("detailed") or [] if isinstance(w, str)]}
+
+
+def _save_ai_state(db: str, state: dict, today: date) -> None:
+    week0 = plan.monday(today).isoformat()
+    state = {**state, "weeks": {w: t for w, t in state["weeks"].items() if w >= week0},
+             "detailed": sorted(w for w in set(state["detailed"]) if w >= week0)}
+    set_text_setting(AI_PLAN_KEY, json.dumps(state), db)
+
+
+def _with_ai_targets(db: str, weeks: list[plan.WeekTarget]) -> list[plan.WeekTarget]:
+    """The rules' week targets, with the phase, hours and note of every week the AI planned."""
+    ai = _ai_state(db)["weeks"]
+    out = []
+    for w in weeks:
+        t = ai.get(w.week_start)
+        if t:
+            w = replace(w, phase=t.get("phase") or w.phase, hours=float(t.get("hours", w.hours)),
+                        note=t.get("note") or plan.PHASE_NOTE.get(t.get("phase"), w.note))
+        out.append(w)
+    return out
+
+
+def _build(db: str, today: date, fill="empty", profile=None, goals=None, inputs=None):
+    """Week targets and the new sessions build_plan makes for this user, saved to the database.
+
+    `fill` is "empty" (only weeks without any session: the plan rolling forward), "all" (every automatic and
+    AI-built session from today on is rebuilt by the rules) or a set of Mondays (just those weeks)."""
     if profile is None:
         profile, goals = _plan_setup(db)
     if profile is None:
@@ -566,15 +609,27 @@ def _build(db: str, today: date, only_empty_weeks: bool, profile=None, goals=Non
     done = _actual_days(db, week0, today - timedelta(days=1))
     weeks, new = plan.build_plan(
         today, inp["ctl"], profile, goals, inp["levels"], inp["rates"], inp["recent_hours"], _week_overrides(db),
-        existing, done, inp["gym_goal"], only_empty_weeks=only_empty_weeks,
+        existing, done, inp["gym_goal"], only_empty_weeks=fill == "empty",
+        fill_weeks=fill if isinstance(fill, set) else None,
     )
     rows = [asdict(p) for p in new]
-    if only_empty_weeks:
+    state = _ai_state(db)
+    if fill == "empty":
         if rows:
             save_plan_days(rows, db)
-    else:
+    elif fill == "all":
         save_plan_days(rows, db, replace_auto_from=today.isoformat())
-    return weeks, inp
+        if state["weeks"] or state["detailed"] or state["summary"]:  # the rules wrote the whole plan: the AI's no longer applies
+            _save_ai_state(db, {**state, "weeks": {}, "detailed": [], "summary": "", "built": None}, today)
+    else:
+        for ws in fill:
+            clear_built_days(max(ws, today).isoformat(), (ws + timedelta(days=6)).isoformat(), db)
+        save_plan_days(rows, db)
+        gone = {w.isoformat() for w in fill}
+        if gone & (set(state["weeks"]) | set(state["detailed"])):
+            _save_ai_state(db, {**state, "weeks": {w: t for w, t in state["weeks"].items() if w not in gone},
+                                "detailed": [w for w in state["detailed"] if w not in gone]}, today)
+    return _with_ai_targets(db, weeks), inp
 
 
 def _readiness_levels(db: str, today: date, settings: dict, series: list[dict]) -> dict[str, str]:
@@ -629,6 +684,7 @@ def _plan_view(db: str, today: date, weeks: list[plan.WeekTarget], actual: dict[
     rows = _plan_rows(db, first, FAR)
     overrides = _week_overrides(db)
     targets = {w.week_start: w for w in weeks}
+    ai = _ai_state(db)
     starts = [first + timedelta(weeks=i) for i in range(past_weeks)] + [date.fromisoformat(w.week_start) for w in weeks]
     out_weeks = []
     for ws in starts:
@@ -654,14 +710,28 @@ def _plan_view(db: str, today: date, weeks: list[plan.WeekTarget], actual: dict[
             "projected_load": target.planned_load if target else None,
             "detailed": target.detailed if target else True,
             "override_hours": overrides.get(ws.isoformat()),
+            # Who wrote the week: its sessions (weeks planned day by day) or its targets (later weeks).
+            "builder": "ai" if ws.isoformat() in (ai["detailed"] if target is None or target.detailed else ai["weeks"])
+                       else "rules",
             **{k: v for k, v in summary_.items() if k != "status"},
             "days": days,
         })
-    return {"weeks": out_weeks, "proposals": _proposals_out(db)}
+    return {"weeks": out_weeks, "proposals": _proposals_out(db),
+            "ai": {"model": ai["model"], "built": ai["built"], "summary": ai["summary"],
+                   "topup_weeks": [w.isoformat() for w in _topup_weeks(db, today)]}}
+
+
+def _topup_weeks(db: str, today: date) -> list[date]:
+    """Weeks after this one, inside the horizon, whose sessions the AI hasn't written yet (the plan rolling
+    forward). The current week is only rebuilt on request, so today's session doesn't change under the athlete."""
+    detailed = set(_ai_state(db)["detailed"])
+    week0 = plan.monday(today)
+    return [w for w in (week0 + timedelta(weeks=i) for i in range(1, plan.HORIZON_WEEKS)) if w.isoformat() not in detailed]
 
 
 def _setup_out(db: str, today: date) -> dict:
     profile, goals = _plan_setup(db)
+    kit = _kit(db)
     suggested = None
     if profile is None:
         hours = {s: 0.0 for s in plan.PLAN_SPORTS}
@@ -674,9 +744,12 @@ def _setup_out(db: str, today: date) -> dict:
         "configured": profile is not None,
         "profile": asdict(profile) if profile else suggested,
         "goals": [asdict(g) for g in goals],
+        "athlete": {"equipment": [k for k in gym.EQUIPMENT if k in kit.equipment], "effort": kit.effort},
+        "about": get_text_setting(GOALS_KEY, db),
         "options": {
             "sports": list(plan.PLAN_SPORTS), "goal_kinds": list(plan.GOAL_KINDS), "weekdays": list(plan.WEEKDAYS),
             "kinds": plan.KINDS_BY_SPORT, "kind_labels": plan.KIND_LABEL, "max_goals": plan.MAX_GOALS,
+            "equipment": gym.EQUIPMENT, "efforts": gym.EFFORTS, "about_max": coach.GOALS_MAX,
         },
     }
 
@@ -692,7 +765,7 @@ def get_plan(
     setup = _setup_out(db, today)
     if not setup["configured"]:
         return {"setup": setup, "weeks": [], "proposals": [], "today": today}
-    weeks, inp = _build(db, today, only_empty_weeks=True)
+    weeks, inp = _build(db, today, "empty")
     actual = _actual_days(db, plan.monday(today) - timedelta(weeks=max(past_weeks, 2)), today)
     _refresh_proposals(db, today, inp, actual)
     return {"setup": setup, "today": today, **_plan_view(db, today, weeks, actual, past_weeks)}
@@ -713,9 +786,16 @@ class GoalBody(BaseModel):
     name: str = Field(default="", max_length=200)
 
 
+class AthleteBody(BaseModel):
+    equipment: list[str] = Field(default_factory=list, max_length=len(gym.EQUIPMENT))
+    effort: str = gym.DEFAULT_EFFORT
+
+
 class SetupBody(BaseModel):
     profile: ProfileBody
     goals: list[GoalBody] = Field(default_factory=list, max_length=10)
+    athlete: AthleteBody | None = None  # the strength setup; left as it is when missing
+    about: str | None = Field(default=None, max_length=coach.GOALS_MAX)  # free text for the AI; the coach's "goals and background"
 
 
 @router.put("/plan/setup")
@@ -726,11 +806,21 @@ def put_plan_setup(body: SetupBody, session: Session = Depends(current_session),
     profile = plan.Profile(**body.profile.model_dump(), start=old.start if old and old.start else today.isoformat())
     goals = [plan.goal_from_dict(g.model_dump()) for g in body.goals]
     errors = plan.setup_errors(profile, goals, today)
+    if body.athlete:
+        unknown = [k for k in body.athlete.equipment if k not in gym.EQUIPMENT]
+        if unknown:
+            errors.append(f"Unknown equipment: {', '.join(unknown)}.")
+        if body.athlete.effort not in gym.EFFORTS:
+            errors.append(f"Unknown effort: {body.athlete.effort}.")
     if errors:
         raise HTTPException(400, " ".join(errors))
+    if body.athlete:
+        set_text_setting(ATHLETE_KEY, json.dumps({"equipment": body.athlete.equipment, "effort": body.athlete.effort}), db)
+    if body.about is not None:
+        set_text_setting(GOALS_KEY, body.about.strip(), db)
     set_text_setting(PROFILE_KEY, json.dumps(asdict(profile)), db)
     set_text_setting(PLAN_GOALS_KEY, json.dumps([asdict(g) for g in goals]), db)
-    _build(db, today, only_empty_weeks=False, profile=profile, goals=goals)
+    _build(db, today, "all", profile=profile, goals=goals)
     return _setup_out(db, today)
 
 
@@ -739,16 +829,111 @@ def delete_plan(session: Session = Depends(current_session)) -> dict:
     """Start over: forget the plan, its proposals, the setup and the per-week hours."""
     db = session.db_path
     clear_plan(db)
-    for key in (PROFILE_KEY, PLAN_GOALS_KEY, *(WEEK_HOURS_PREFIX + w for w in _week_overrides(db))):
+    for key in (PROFILE_KEY, PLAN_GOALS_KEY, AI_PLAN_KEY, *(WEEK_HOURS_PREFIX + w for w in _week_overrides(db))):
         delete_setting(key, db)
     return {"ok": True}
 
 
 @router.post("/plan/generate")
 def generate_plan(session: Session = Depends(current_session), today: date = Depends(local_today)) -> dict:
-    """Rebuild every automatic session from today on. Edited, locked, coach and applied sessions stay."""
-    _build(session.db_path, today, only_empty_weeks=False)
+    """Rebuild every automatic session from today on with the rules. Edited, locked, coach and applied sessions stay."""
+    _build(session.db_path, today, "all")
     return {"ok": True}
+
+
+class BuildBody(BaseModel):
+    mode: Literal["all", "topup", "week"] = "all"
+    week_start: date | None = None  # mode "week"
+    model: str | None = None
+    api_key: str | None = None
+
+
+_plan_locks: dict[str, threading.Lock] = {}
+_plan_locks_guard = threading.Lock()
+
+
+def _plan_lock(db: str) -> threading.Lock:
+    with _plan_locks_guard:
+        return _plan_locks.setdefault(db, threading.Lock())
+
+
+@router.post("/plan/build")
+def build_plan_route(body: BuildBody, session: Session = Depends(current_session), today: date = Depends(local_today)) -> dict:
+    """Build the plan with the AI coach: "all" rebuilds every automatic session from today on, "topup" writes the
+    coming weeks it hasn't planned yet, "week" one week. Without a key, or when the AI fails, the rules build it."""
+    db = session.db_path
+    profile, goals = _plan_setup(db)
+    if profile is None:
+        raise HTTPException(400, "Set up your plan first.")
+    week0 = plan.monday(today)
+    horizon = {week0 + timedelta(weeks=i) for i in range(plan.HORIZON_WEEKS)}
+    if body.mode == "week":
+        if body.week_start is None or body.week_start.weekday() != 0 or body.week_start < week0:
+            raise HTTPException(400, "Pick a week from this one on, starting on a Monday.")
+        fill = {body.week_start} & horizon
+    elif body.mode == "topup":
+        fill = set(_topup_weeks(db, today))
+    else:
+        fill = horizon
+    if not fill:
+        return {"builder": "ai", "status": "up_to_date"}
+    lock = _plan_lock(db)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, "The plan is already being built.")
+    try:
+        rules_fill = "all" if body.mode == "all" else "empty" if body.mode == "topup" else fill
+        if not coach.is_available(body.api_key):
+            _build(db, today, rules_fill, profile, goals)
+            return {"builder": "rules", "fallback": None}
+        try:
+            return _ai_build(db, today, profile, goals, fill, body)
+        except coach.CoachError as exc:
+            _build(db, today, rules_fill, profile, goals)
+            return {"builder": "rules", "fallback": str(exc)}
+    finally:
+        lock.release()
+
+
+def _ai_build(db: str, today: date, profile: plan.Profile, goals: list[plan.Goal], fill: set[date], body: BuildBody) -> dict:
+    """Ask the AI for the plan, hold it to the limits and save it. Weeks it left empty are planned by the rules."""
+    inp = _plan_inputs(db, today)
+    week0 = plan.monday(today)
+    existing = _plan_rows(db, week0, FAR)
+    done = _actual_days(db, week0, today - timedelta(days=1))
+    overrides = _week_overrides(db)
+    state = _ai_state(db)
+    history = activity_loads(week0 - timedelta(weeks=plan.AI_RECENT_WEEKS), today, db)
+    payload = plan.ai_request(
+        today, profile, goals, inp["levels"], gym.GOAL_LABEL[inp["gym_goal"]], inp["ctl"], form_today(inp["series"]),
+        inp["rates"], plan.recent_weeks(history, today), daily_wellness(today - timedelta(days=90), today, db),
+        _readiness_levels(db, today, inp["settings"], inp["series"]), existing, done, overrides, fill,
+        previous_weeks=state["weeks"], goals_text=get_text_setting(GOALS_KEY, db), kit=_kit(db),
+    )
+    ai = coach.ask_plan(payload, model=body.model, api_key=body.api_key)
+    result = plan.check_ai_plan(
+        [x.model_dump() for x in ai.sessions], [w.model_dump() for w in ai.weeks], today, fill, existing, done,
+        profile, goals, inp["levels"], inp["rates"], inp["ctl"], overrides,
+    )
+    planned = {plan.monday(date.fromisoformat(p.day)) for p in result.rows if p.kind != "event"}
+    if not planned:
+        raise coach.CoachError("The coach's plan had no usable sessions" + (f" ({result.skipped[0]})" if result.skipped else "") + ".")
+    for ws in planned:
+        clear_built_days(max(ws, today).isoformat(), (ws + timedelta(days=6)).isoformat(), db)
+    save_plan_days([asdict(p) for p in result.rows if plan.monday(date.fromisoformat(p.day)) in planned], db)
+    missing = fill - planned
+    if missing:
+        _build(db, today, missing, profile, goals, inp)
+    # Targets: the AI's for the weeks it just planned and everything after; earlier weeks keep theirs.
+    first = min(fill).isoformat()
+    weeks = {w: t for w, t in state["weeks"].items() if w < first}
+    weeks.update({w: t for w, t in result.weeks.items() if w >= first or w not in weeks})
+    detailed = [w for w in state["detailed"] if date.fromisoformat(w) not in fill] if body.mode != "all" else []
+    _save_ai_state(db, {"model": body.model or coach.DEFAULT_MODEL, "built": today.isoformat(), "summary": ai.summary.strip()[:1000],
+                        "weeks": weeks, "detailed": detailed + [w.isoformat() for w in planned]}, today)
+    return {
+        "builder": "ai", "summary": ai.summary, "adjusted": result.adjusted, "skipped": result.skipped,
+        "rules_weeks": sorted(w.isoformat() for w in missing),
+    }
 
 
 class WeekHoursBody(BaseModel):
@@ -770,7 +955,7 @@ def put_week_hours(
         delete_setting(key, db)
     else:
         set_text_setting(key, str(body.hours), db)
-    _build(db, today, only_empty_weeks=False)
+    _build(db, today, {week_start})
     return {"week_start": week_start, "hours": body.hours}
 
 
@@ -849,6 +1034,8 @@ def edit_plan_day(
         if problem:
             raise HTTPException(400, problem)
         new = replace(new, source="user", planned_load=plan.planned_load(new.sport, new.kind, new.minutes, _rates(db, today)))
+        if (new.sport, new.kind) != (row.sport, row.kind):
+            new = replace(new, exercises=None)  # the AI's exercises were for the old session
     save_plan_days([asdict(new)], db)
     return {"session": _session_out(new), "warnings": _warnings(db, new.day)}
 
@@ -920,6 +1107,8 @@ def apply_proposal(pid: int, session: Session = Depends(current_session), today:
             save_plan_days([asdict(plan.PlanDay(
                 c["day"], c["slot"], after["sport"], after["kind"], after["minutes"], after.get("planned_load", 0.0),
                 source, False, after.get("note") or (old.note if old else ""),
+                # A shorter or longer gym session keeps the AI's exercises; a different one doesn't.
+                old.exercises if old and (old.sport, old.kind) == (after["sport"], after["kind"]) else None,
             ))], db)
     set_proposal_status(pid, "applied", db)
     return {"ok": True}
@@ -945,10 +1134,11 @@ def plan_day_workout(
         return {"workout": None}
     inp = _plan_inputs(db, today)
     neutral = Readiness("green", 100, [], "As planned.")
-    tp = {"sport": row.sport, "kind": row.kind, "minutes": row.minutes,
+    tp = {"sport": row.sport, "kind": row.kind, "minutes": row.minutes, "exercises": row.exercises,
           "planned": {"label": plan.describe(row.sport, row.kind, row.minutes)}, "reason": None}
     trained = gym.last_trained(strength_sessions(today - timedelta(days=60), today, db), today)
-    s = plan.plan_suggestion(tp, neutral, [], trained, day, inp["levels"].get(row.sport, "intermediate"), inp["gym_goal"])
+    s = plan.plan_suggestion(tp, neutral, [], trained, day, inp["levels"].get(row.sport, "intermediate"), inp["gym_goal"],
+                             kit=_kit(db))
     return {"workout": _workout_out(s, row.sport, inp["settings"]), "ftp": inp["settings"].get("ftp_w") or DEFAULT_FTP}
 
 
@@ -963,7 +1153,7 @@ def _coach_plan_block(db: str, today: date) -> dict | None:
     profile, goals = _plan_setup(db)
     if profile is None:
         return None
-    weeks, _ = _build(db, today, only_empty_weeks=True)
+    weeks, _ = _build(db, today, "empty")
     week0 = plan.monday(today)
     start = week0 - timedelta(weeks=plan.COACH_COMPLIANCE_WEEKS)
     end = week0 + timedelta(weeks=plan.COACH_WEEKS) - timedelta(days=1)

@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS plan_days (
     source       TEXT NOT NULL DEFAULT 'auto',
     locked       INTEGER NOT NULL DEFAULT 0,
     note         TEXT NOT NULL DEFAULT '',
+    exercises_json TEXT,
     PRIMARY KEY (day, slot)
 )
 """
@@ -157,7 +158,9 @@ CREATE TABLE IF NOT EXISTS plan_proposals (
     source       TEXT NOT NULL DEFAULT 'rules'
 )
 """
-PLAN_COLUMNS = ("day", "slot", "sport", "kind", "minutes", "planned_load", "source", "locked", "note")
+PLAN_COLUMNS = ("day", "slot", "sport", "kind", "minutes", "planned_load", "source", "locked", "note", "exercises_json")
+# Columns added to plan_days after it was first created.
+PLAN_MIGRATION_COLUMNS = {"exercises_json": "TEXT"}  # the AI's exercises for a gym session (JSON list), else NULL
 
 # Defaults for user settings (stored as text, converted on read).
 SETTING_DEFAULTS: dict[str, float | None] = {
@@ -265,6 +268,10 @@ def init_db(db_path: str | None = None) -> None:
         conn.execute(WELLNESS_SCHEMA)
         conn.execute(SETTINGS_SCHEMA)
         conn.execute(PLAN_SCHEMA)
+        planned = {r[1] for r in conn.execute("PRAGMA table_info(plan_days)")}
+        for col, typ in PLAN_MIGRATION_COLUMNS.items():
+            if col not in planned:
+                conn.execute(f"ALTER TABLE plan_days ADD COLUMN {col} {typ}")
         conn.execute(PROPOSALS_SCHEMA)
 
 
@@ -377,7 +384,14 @@ def save_activities(activities: list[dict], user_email: str, db_path: str | None
 
 
 def _plan_row(r: sqlite3.Row) -> dict:
-    return {**dict(r), "locked": bool(r["locked"])}
+    row = {**dict(r), "locked": bool(r["locked"])}
+    raw = row.pop("exercises_json", None)
+    try:
+        exercises = json.loads(raw) if raw else None
+    except ValueError:
+        exercises = None
+    row["exercises"] = exercises if isinstance(exercises, list) and exercises else None
+    return row
 
 
 def get_plan_days(start: str, end: str, db_path: str | None = None) -> list[dict]:
@@ -398,18 +412,29 @@ def last_plan_day(db_path: str | None = None) -> str | None:
 
 
 def save_plan_days(rows: list[dict], db_path: str | None = None, replace_auto_from: str | None = None) -> None:
-    """Upsert planned sessions. With `replace_auto_from`, unlocked auto sessions from that day on are deleted
-    first (a regenerate), so only the athlete's own and applied changes survive."""
+    """Upsert planned sessions. With `replace_auto_from`, unlocked auto and AI-built sessions from that day on are
+    deleted first (a regenerate), so only the athlete's own and applied changes survive."""
     init_db(db_path)
     with sqlite3.connect(resolve(db_path)) as conn:
         if replace_auto_from:
-            conn.execute("DELETE FROM plan_days WHERE day >= ? AND source = 'auto' AND locked = 0", (replace_auto_from,))
+            conn.execute(f"DELETE FROM plan_days WHERE day >= ? AND {_BUILT}", (replace_auto_from,))
         updates = ", ".join(f"{c} = excluded.{c}" for c in PLAN_COLUMNS if c not in ("day", "slot"))
         conn.executemany(
             f"INSERT INTO plan_days ({', '.join(PLAN_COLUMNS)}) VALUES ({', '.join(':' + c for c in PLAN_COLUMNS)}) "
             f"ON CONFLICT(day, slot) DO UPDATE SET {updates}",
-            [{**{c: r.get(c) for c in PLAN_COLUMNS}, "locked": int(bool(r.get("locked")))} for r in rows],
+            [{**{c: r.get(c) for c in PLAN_COLUMNS}, "locked": int(bool(r.get("locked"))),
+              "exercises_json": json.dumps(r["exercises"]) if r.get("exercises") else None} for r in rows],
         )
+
+
+_BUILT = "source IN ('auto', 'ai') AND locked = 0"  # sessions a plan rebuild may replace
+
+
+def clear_built_days(start: str, end: str, db_path: str | None = None) -> None:
+    """Delete the unlocked auto and AI-built sessions from `start` to `end` (inclusive), before refilling them."""
+    init_db(db_path)
+    with sqlite3.connect(resolve(db_path)) as conn:
+        conn.execute(f"DELETE FROM plan_days WHERE day BETWEEN ? AND ? AND {_BUILT}", (start, end))
 
 
 def delete_plan_day(day: str, slot: int, db_path: str | None = None) -> None:

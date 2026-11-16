@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { STATUS, changeLine, fitRoute, fmtHM, fmtMinutes, fmtPace, goalLine, mercator, parsePace, rangeStats, sampleIndices, trailingAverage, withOption } from "./lib";
+import { STATUS, buildMessage, changeLine, fitRoute, fmtHM, fmtMinutes, fmtPace, goalLine, mercator, parsePace, rangeStats, sampleIndices, trailingAverage, withOption } from "./lib";
 
 describe("rangeStats", () => {
   const minutes = [0, 10, 20, 30];
@@ -123,5 +123,19 @@ describe("training plan helpers", () => {
   it("labels every day status", () => {
     expect(STATUS.missed.tone).toBe("bad");
     expect(STATUS.done.label).toBe("Done");
+  });
+});
+
+describe("buildMessage", () => {
+  it("says who built the plan and why", () => {
+    expect(buildMessage({ builder: "ai", status: "up_to_date" }, "topup")).toBeNull();
+    expect(buildMessage({ builder: "rules", fallback: null }, "all")?.text).toBe("The plan was built by the rules. Your own sessions were kept.");
+    const failed = buildMessage({ builder: "rules", fallback: "OpenRouter is down." }, "week");
+    expect(failed?.kind).toBe("error");
+    expect(failed?.text).toBe("The AI coach couldn't build it (OpenRouter is down). That week was built by the rules instead.");
+    const ai = buildMessage({ builder: "ai", adjusted: ["Sat: long shortened to 300 min."], skipped: ["Tue: you keep that day free."], rules_weeks: [] }, "all");
+    expect(ai?.text).toBe("Your plan was built by the AI coach. Kept within your limits:");
+    expect(ai?.details).toEqual(["Sat: long shortened to 300 min.", "Left out: Tue: you keep that day free."]);
+    expect(buildMessage({ builder: "ai", rules_weeks: ["2026-11-16"] }, "topup")?.text).toContain("The rules planned the weeks it left empty (");
   });
 });

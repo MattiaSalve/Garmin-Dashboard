@@ -405,3 +405,146 @@ def test_coach_rest_clears_a_session_and_no_ops_are_dropped():
         {"day": tue, "slot": 0, "sport": "cycling", "kind": "threshold", "minutes": 75},
     ], rows, TODAY, RATES)
     assert changes == [{"day": tue, "slot": 1, "before": P.session_view(rows[1]), "after": None}] and skipped == []
+
+
+# ------------------------------------------------------------------ AI-built plan
+
+W0 = P.monday(TODAY)  # this week (TODAY is its Friday); MON is next week
+
+
+def ai(day, sport="cycling", kind="endurance", minutes=60, slot=0, note=""):
+    return {"day": day.isoformat(), "slot": slot, "sport": sport, "kind": kind, "minutes": minutes, "note": note}
+
+
+def check(sessions, weeks=(), fill=frozenset({MON}), existing=(), done=None, prof=None, goals=(), ctl=60, overrides=None):
+    return P.check_ai_plan(list(sessions), list(weeks), TODAY, set(fill), list(existing), done or {}, prof or profile(),
+                           list(goals), LEVELS, RATES, ctl, overrides or {})
+
+
+def test_ai_sessions_are_kept_as_written_within_the_limits():
+    plan = [ai(MON + timedelta(days=1), kind="threshold", minutes=75, note="2x20"), ai(MON + timedelta(days=5), kind="long", minutes=180),
+            ai(MON + timedelta(days=2), sport="gym", kind="lower", minutes=45, slot=1)]
+    r = check(plan, [{"week_start": MON.isoformat(), "phase": "Build", "hours": 5, "note": "First build week."}],
+              prof=profile({"cycling": 0.8, "gym": 0.2}))
+    assert [(p.kind, p.minutes, p.source) for p in r.rows] == [("threshold", 75, "ai"), ("lower", 45, "ai"), ("long", 180, "ai")]
+    assert r.rows[0].note == "2x20" and r.rows[1].slot == 0  # the free main slot is used
+    assert r.weeks[MON.isoformat()] == {"phase": "build", "hours": 5.0, "note": "First build week."}
+    assert not r.adjusted and not r.skipped
+
+
+def test_ai_sessions_are_capped_by_level_and_bad_ones_skipped():
+    plan = [ai(MON, kind="vo2max", minutes=150), ai(MON + timedelta(days=5), kind="long", minutes=400),
+            ai(MON + timedelta(days=1), sport="running"), ai(MON + timedelta(days=2), kind="swim_drills"),
+            ai(MON + timedelta(weeks=3)), ai(TODAY - timedelta(days=1)), ai(MON + timedelta(days=3), kind="rest")]
+    r = check(plan)
+    assert [(p.kind, p.minutes) for p in r.rows] == [("vo2max", P.HARD_CAP["cycling"]), ("long", P.LONG_CAP["cycling"]["intermediate"])]
+    assert len(r.adjusted) == 2 and len(r.skipped) == 4  # running isn't a sport here, unknown kind, two outside the weeks
+
+
+def test_ai_plan_respects_fixed_sessions_free_days_and_the_event():
+    event = MON + timedelta(days=6)
+    fixed = [P.PlanDay((MON + timedelta(days=1)).isoformat(), 0, "rest", "rest", 0, 0, "user"),
+             P.PlanDay((MON + timedelta(days=2)).isoformat(), 0, "cycling", "tempo", 60, 60, "user"),
+             P.PlanDay((MON + timedelta(days=3)).isoformat(), 0, "cycling", "endurance", 60, 60, "auto")]  # replaced
+    goal = P.Goal("event", "cycling", event.isoformat(), 3, "Secret race")
+    plan = [ai(MON + timedelta(days=1)), ai(MON + timedelta(days=2), minutes=40), ai(MON + timedelta(days=3), kind="recovery", minutes=40),
+            ai(event - timedelta(days=1)), ai(event)]
+    r = check(plan, existing=fixed, goals=[goal])
+    rows = {(p.day, p.slot): p for p in r.rows}
+    assert ((MON + timedelta(days=2)).isoformat(), 1) in rows  # next to the athlete's tempo, in slot 1
+    assert rows[((MON + timedelta(days=3)).isoformat(), 0)].kind == "recovery"
+    assert rows[(event.isoformat(), 0)].kind == "event" and rows[(event.isoformat(), 0)].source == "ai"
+    assert len(r.skipped) == 3  # the free day, the day before the event, the event day
+
+
+def test_ai_week_is_trimmed_to_the_hours_available():
+    plan = [ai(MON + timedelta(days=i), minutes=120) for i in range(5)]  # 10 h
+    r = check(plan, overrides={MON.isoformat(): 4}, weeks=[{"week_start": MON.isoformat(), "phase": "build", "hours": 10}])
+    assert sum(p.minutes for p in r.rows) <= 4 * 60 * P.AI_HOURS_TOLERANCE
+    assert r.weeks[MON.isoformat()]["hours"] == 4 and "trimmed" in r.adjusted[0]
+    tiny = check(plan, overrides={MON.isoformat(): 1})  # even the shortest rides don't fit: some are left out
+    assert sum(p.minutes for p in tiny.rows) <= 60 * P.AI_HOURS_TOLERANCE and tiny.skipped
+
+
+def test_ai_week_is_shortened_when_fitness_would_rise_too_fast():
+    plan = [ai(MON + timedelta(days=i), kind="threshold", minutes=90) for i in range(7)]
+    r = check(plan, prof=profile(hours=20), ctl=20)
+    assert sum(p.planned_load for p in r.rows) <= P.ramp_cap(20) + 10
+    assert any("fitness rises" in a for a in r.adjusted)
+
+
+def test_ai_week_counts_what_was_done_this_week():
+    done = {(W0 + timedelta(days=i)).isoformat(): {"minutes": 120, "load": 100} for i in range(4)}  # Mon-Thu, 8 h
+    r = check([ai(TODAY, minutes=60), ai(TODAY + timedelta(days=1), minutes=60)], fill={W0}, done=done)
+    assert sum(p.minutes for p in r.rows) <= 70 and r.adjusted  # 7 h a week, 8 already done: only the minimum is left
+
+
+def test_ai_request_is_identifier_free_and_lists_what_to_keep():
+    goal = P.Goal("event", "cycling", (MON + timedelta(weeks=8)).isoformat(), 4, "Gran Fondo Lugano")
+    existing = [P.PlanDay((MON + timedelta(days=1)).isoformat(), 0, "rest", "rest", 0, 0, "user"),
+                P.PlanDay((MON + timedelta(days=2)).isoformat(), 0, "cycling", "endurance", 60, 60, "auto"),
+                P.PlanDay((MON + timedelta(weeks=1)).isoformat(), 0, "cycling", "tempo", 60, 60, "ai")]
+    acts = [{"day": (W0 - timedelta(days=3)).isoformat(), "sport_type": "road_biking", "minutes": 90, "load": 80, "hard_min": 2}]
+    req = P.ai_request(TODAY, profile(), [goal], LEVELS, "Support my endurance training", 50, -5, RATES,
+                       P.recent_weeks(acts, TODAY), [{"day": "2026-11-12", "hrv_avg": 100, "raw_json": "{}"}], {"2026-11-13": "green"},
+                       existing, {}, {MON.isoformat(): 4}, {MON}, goals_text="Ride far")
+    text = str(req)
+    assert "Lugano" not in text and "raw_json" not in text
+    assert req["weeks_to_plan"] == [MON.isoformat()] and req["targets_until"] == (MON + timedelta(weeks=8)).isoformat()
+    assert req["fixed_sessions"] == [{"day": (MON + timedelta(days=1)).isoformat(), "weekday": "Tuesday", "slot": 0, "sport": "rest",
+                                      "kind": "rest", "minutes": 0, "why": "kept free by the athlete"}]
+    assert [r["kind"] for r in req["already_planned_other_weeks"]] == ["tempo"]
+    assert req["recent_weeks"][-1]["hours"] == 1.5 and req["hours_available"] == {MON.isoformat(): 4}
+    assert req["limits"]["max_load_this_week"] == P.ramp_cap(50) and set(req["kinds_by_sport"]) == {"cycling"}
+
+
+def test_rules_fill_only_the_asked_weeks_and_replace_ai_sessions_there():
+    _, first = P.build_plan(TODAY, 45, profile(), [], LEVELS, RATES, 6)
+    existing = [P.PlanDay(p.day, p.slot, p.sport, p.kind, p.minutes, p.planned_load, "ai") for p in first]
+    _, again = P.build_plan(TODAY, 45, profile(), [], LEVELS, RATES, 6, existing=existing, fill_weeks={MON})
+    assert again and {P.monday(date.fromisoformat(p.day)) for p in again} == {MON}
+
+
+AI_EXERCISES = [
+    {"name": "Pistol squat progression", "group": "legs", "sets": 4, "reps": "5–8", "rpe": 10, "rest_s": 150, "note": "To failure."},
+    {"name": "Ring leg curl", "group": "legs", "sets": 3, "reps": "8–12", "rpe": 10, "rest_s": 120, "note": ""},
+    {"name": "Bulgarian split squat on the box", "group": "legs", "sets": 3, "reps": "8–10", "rpe": 10, "rest_s": 120, "note": ""},
+    {"name": "Hanging knee raise", "group": "core", "sets": 3, "reps": "10–15", "rpe": 9, "rest_s": 60, "note": ""},
+]
+
+
+def test_ai_gym_sessions_keep_their_exercises_tidied():
+    messy = [*AI_EXERCISES, {"name": "  "}, "junk", {"name": "x" * 200, "group": "arms", "sets": "lots", "rpe": 99}]
+    plan = [{**ai(MON + timedelta(days=2), sport="gym", kind="lower", minutes=50), "exercises": messy},
+            {**ai(MON + timedelta(days=3)), "exercises": AI_EXERCISES}]  # a ride never carries exercises
+    r = check(plan, prof=profile({"cycling": 0.8, "gym": 0.2}))
+    g, ride = r.rows
+    assert g.exercises[:4] == AI_EXERCISES and len(g.exercises) == 5 and ride.exercises is None
+    assert g.exercises[4] == {"name": "x" * 80, "group": "legs", "sets": 3, "reps": "8–12", "rpe": 10, "rest_s": 60, "note": ""}
+
+
+def test_ai_request_describes_the_gym_setup_only_with_gym():
+    args = (TODAY, profile({"cycling": 0.8, "gym": 0.2}), [], LEVELS, "Build muscle", 50, -5, RATES, [], [], {}, [], {}, {}, {MON})
+    kit = gym.Kit(frozenset({"pullup_bar", "rings", "box"}), "failure")
+    req = P.ai_request(*args, kit=kit)
+    assert req["gym_setup"] == {"equipment": ["Pull-up bar", "Gymnastic rings", "Box or bench"], "effort": gym.EFFORTS["failure"]}
+    assert P.ai_request(*args[:1], profile(), *args[2:], kit=kit)["gym_setup"] is None
+
+
+def test_plan_suggestion_uses_the_ai_exercises_and_fits_them_to_the_day():
+    trained = gym.last_trained([], TODAY)
+    g = {"sport": "gym", "kind": "lower", "minutes": 60, "planned": {"label": "Gym: legs, 1 h"}, "exercises": AI_EXERCISES}
+    s = P.plan_suggestion(g, ready(), [], trained, TODAY, "intermediate")
+    assert s.exercises == AI_EXERCISES and s.session.name == gym.FOCUS["lower"].name
+    assert any("AI coach" in r for r in s.rationale)
+    short = P.plan_suggestion(g, ready(), [], trained, TODAY, "intermediate", minutes=25)
+    assert len(short.exercises) == 2 and any("2 of its 4" in r for r in short.rationale)
+    amber = P.plan_suggestion(g, ready("amber", 60), [], trained, TODAY, "intermediate")
+    assert amber.exercises[0]["sets"] == 3 and amber.exercises[0]["rpe"] == 8 and "Amber" in amber.exercises[0]["note"]
+    changed = P.plan_suggestion({**g, "kind": "mobility", "changed": True}, ready("red", 40), [], trained, TODAY, "intermediate")
+    assert changed.session.key == "mobility" and changed.exercises != AI_EXERCISES  # readiness replaced the session
+
+
+def test_today_from_plan_carries_the_exercises():
+    p = [P.PlanDay(TODAY.isoformat(), 0, "gym", "lower", 50, 10, "ai", False, "", AI_EXERCISES)]
+    assert P.today_from_plan(p, ready(), [], TODAY)["exercises"] == AI_EXERCISES

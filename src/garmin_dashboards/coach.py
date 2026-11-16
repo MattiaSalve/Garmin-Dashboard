@@ -67,8 +67,10 @@ for today in "sport_today".
   seconds, muscle group). "gym.days_since_trained" says how many days ago each muscle group was last trained
   (null = nothing in the recent data) and "gym.goal_label" is why the athlete lifts: for "Support my endurance
   training" protect their rides and runs (no heavy leg work within 48 h of hard training or before a key session,
-  stop sets short of failure, favour legs, hips and core). Propose changes with the complete list in
-  adjusted_exercises and leave adjusted_steps null. In every other sport leave adjusted_exercises null.
+  stop sets short of failure, favour legs, hips and core). "gym.equipment" is what the athlete trains with:
+  only use exercises that can be done with it (bodyweight always works). "gym.effort" says how hard the sets go:
+  with "To failure" every working set ends at failure (rpe 10) unless recovery is poor. Propose changes with the
+  complete list in adjusted_exercises and leave adjusted_steps null. In every other sport leave adjusted_exercises null.
 - The workout you propose can be in a different sport from "sport_today" when the athlete's message points
   that way (e.g. they ask for a bodyweight or home workout, or a run instead of a ride). Set "workout_sport" to
   "cycling", "running", "swimming" or "gym" for the sport of the workout in adjusted_steps / adjusted_exercises.
@@ -323,19 +325,20 @@ def build_payload(
                 ],
             }
         ),
-        **({"gym": {"goal_label": gym["goal_label"], "days_since_trained": gym["days_since"]}} if gym else {}),
+        **({"gym": {"goal_label": gym["goal_label"], "days_since_trained": gym["days_since"],
+                    **({"equipment": gym["equipment"], "effort": gym["effort"]} if "equipment" in gym else {})}} if gym else {}),
         **({"training_plan": plan} if plan else {}),
     }
 
 
-def _post(body: dict, key: str) -> dict:
+def _post(body: dict, key: str, timeout: float = TIMEOUT_S) -> dict:
     request = urllib.request.Request(
         URL,
         data=json.dumps(body).encode(),
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
@@ -347,6 +350,30 @@ def _post(body: dict, key: str) -> dict:
         raise CoachError(f"OpenRouter error ({exc.code}).") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise CoachError("Couldn't reach OpenRouter. Check your connection.") from exc
+
+
+def _text(content) -> str:
+    if isinstance(content, list):  # some providers return a list of parts
+        return "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    return content if isinstance(content, str) else ""
+
+
+def _reply(data: dict, model: str) -> tuple[str, dict]:
+    """The reply text and its choice. Raises CoachError for errors OpenRouter reports inside a 200 response."""
+    error = data.get("error")
+    choice = (data.get("choices") or [{}])[0]
+    error = error or choice.get("error")
+    if error or choice.get("finish_reason") == "error":
+        message = error.get("message") if isinstance(error, dict) else error
+        log.warning("OpenRouter error from %s: %s", model, error)
+        raise CoachError(f"The model's provider failed ({message or 'unknown error'}). Try again, or pick another model.")
+    if choice.get("finish_reason") == "content_filter":
+        raise CoachError("The coach declined to answer this request.")
+    text = _text((choice.get("message") or {}).get("content"))
+    if not text.strip():
+        log.warning("Empty coach reply from %s (provider=%s, finish_reason=%s, usage=%s)", model,
+                    data.get("provider"), choice.get("finish_reason"), data.get("usage"))
+    return text, choice
 
 
 def ask_coach(
@@ -373,15 +400,21 @@ def ask_coach(
             *turns,
         ],
     }
-    data = post(body, key)
-    choice = (data.get("choices") or [{}])[0]
-    if choice.get("finish_reason") == "content_filter":
-        raise CoachError("The coach declined to answer this request.")
-    content = (choice.get("message") or {}).get("content")
-    if isinstance(content, list):  # some providers return a list of parts
-        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
-    text = content or ""
+    return _ask_json(body, key, post, CoachAdvice)
+
+
+def _ask_json(body: dict, key: str, post, cls: type[BaseModel]):
+    """Send the request and validate the JSON reply into `cls`. One retry when the reply comes back empty."""
+    text, choice = _reply(post(body, key), body["model"])
     if not text.strip():
+        # Usually a one-off provider hiccup, or a reasoning model that spent the whole budget thinking:
+        # retry once, asking for less reasoning in the second case.
+        if choice.get("finish_reason") == "length":
+            body = {**body, "reasoning": {"effort": "low"}}
+        text, choice = _reply(post(body, key), body["model"])
+    if not text.strip():
+        if choice.get("finish_reason") == "length":
+            raise CoachError("The coach spent its whole reply thinking and wrote no answer. Try again, or pick a faster model.")
         raise CoachError("The coach sent an empty reply. Try again, or pick another model.")
     truncated = choice.get("finish_reason") == "length"
     # Some models wrap the JSON in a code fence or add a sentence around it.
@@ -389,7 +422,7 @@ def ask_coach(
     if 0 <= start < end:
         text = text[start:end + 1]
     try:
-        return CoachAdvice.model_validate_json(text)
+        return cls.model_validate_json(text)
     except ValidationError as exc:
         log.warning("Unusable coach reply from %s (finish_reason=%s): %s | %.1500s", body["model"], choice.get("finish_reason"), exc, text)
         if truncated:
@@ -397,3 +430,123 @@ def ask_coach(
         first = exc.errors()[0] if exc.errors() else {}
         where = ".".join(str(p) for p in first.get("loc", ())) or "reply"
         raise CoachError(f"The coach returned an unexpected response ({where}: {first.get('msg', 'invalid')}). Try again or pick another model.") from exc
+
+
+# ------------------------------------------------------------------ AI plan builder
+
+PLAN_TIMEOUT_S = 150  # a multi-week plan is a long answer, and reasoning models think first
+PLAN_MAX_TOKENS = 12000
+
+PLAN_SYSTEM = """You are an experienced, conservative endurance coach (cycling, running, swimming and strength
+for endurance athletes). You design the athlete's multi-week training plan. You receive a JSON brief:
+
+- "goals" (the first one matters most; "weeks_to_go" counts down to its date), "athlete_goals" (their own words),
+  "profile" (sports with the share of sessions each should get, hours_per_week, sessions_per_week (null = your
+  choice), preferred_long_day) and "hours_available" (weeks where the athlete has less time than usual).
+- "athlete_levels" per sport, "fitness" (ctl = 42-day fitness and form_tsb from Garmin training load),
+  "load_per_hour" (the athlete's own Garmin training load per hour by sport and intensity class) and
+  "kind_intensity" (the class of each session kind).
+- "gym_goal" and "gym_setup" (when strength is one of the sports): the equipment the athlete has and how hard they
+  want their sets ("To failure" means hard sessions with working sets taken to failure).
+- "recent_weeks" (what they really did, week by week), "done_this_week", "recovery_last_7_days" and
+  "readiness_last_days" (green / amber / red).
+- "fixed_sessions": sessions in the weeks you plan that the athlete set, locked or keeps free, plus the goal event.
+  Keep them and plan around them; never put a session on a day "kept free by the athlete".
+- "already_planned_other_weeks" and "previous_week_targets": the plan around the weeks you write, for continuity.
+- "limits": hard limits enforced after you answer. Sessions longer than max_session_minutes are cut, weeks over
+  the athlete's hours are trimmed, and weeks whose load would raise fitness by more than max_fitness_rise_per_week
+  are shortened ("max_load_this_week" is that cap for the current week). Plan within them.
+
+Write the plan:
+- "weeks": one entry for every week from the current one up to "targets_until": week_start (a Monday), phase
+  ("base", "build", "recovery", "taper" or "race"), hours (planned training hours, within the time available) and a
+  one-sentence note on the week's purpose. Use periodisation that fits the goal and the athlete: progressive build
+  weeks, regular easier weeks, a taper and an easy event week before a dated event. Start from what they have
+  really been doing lately (recent_weeks), not from their maximum time, and ramp up gradually.
+- "sessions": every session of the weeks in "weeks_to_plan", from today on (never before today): day (YYYY-MM-DD),
+  slot (0 = main session, 1 = a second session that day, e.g. gym after an easy ride), sport, kind (only kinds
+  listed in "kinds_by_sport" for that sport), minutes and a short note saying what the session is for.
+- Split the sessions between the sports by their shares. Put the long session on the preferred long day unless
+  fixed sessions or the week's purpose say otherwise. Keep quality sessions (tempo, sweet_spot, fartlek,
+  threshold, vo2max) apart, with easy days around them, and avoid leg-heavy gym (lower, full) the day before a
+  quality or long session. Fit intensity to the level in each sport: beginners need fewer and gentler quality
+  sessions. When readiness has been amber or red lately or form is very negative, make the first days easy.
+- Every gym session also gets "exercises": the full workout, in order, each with name, group (legs, push, pull,
+  core or mobility), sets, reps (e.g. "6–8" or "30 s"), rpe (1-10, 10 = failure), rest_s and a short note. Use
+  only exercises that can be done with gym_setup's equipment (bodyweight always works), match the session kind
+  (lower = legs, upper = push and pull, full, core, mobility), the gym goal and the effort: with "To failure", working
+  sets at rpe 10 with progressions hard enough to fail in the rep range, except in recovery and taper weeks. Fit the
+  exercises (sets × (45 s + rest) plus a 6-minute warm-up) into the session's minutes.
+- Write the session totals so each week's minutes match its "hours".
+- "summary": 2-4 sentences on the approach: the phases, how it leads to the goal, and anything you changed
+  because of recovery or recent training. No medical claims."""
+
+
+class AIPlanWeek(BaseModel):
+    week_start: str
+    phase: str = "build"
+    hours: float = 0
+    note: str = ""
+
+    @field_validator("week_start", "phase", "note", mode="before")
+    @classmethod
+    def _text(cls, v):
+        return "" if v is None else str(v)
+
+    @field_validator("phase")
+    @classmethod
+    def _phase(cls, v):
+        return v.strip().lower() or "build"
+
+    @field_validator("hours", mode="before")
+    @classmethod
+    def _hours(cls, v):
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+        match = re.search(r"\d+(?:\.\d+)?", str(v or ""))
+        return float(match.group()) if match else 0.0
+
+
+class AIPlanSession(CoachPlanChange):
+    """A planned session; gym sessions carry the AI's exercises."""
+    exercises: list[CoachExercise] | None = None
+
+    @field_validator("exercises", mode="before")
+    @classmethod
+    def _exercises(cls, v):
+        if not isinstance(v, list):
+            return None
+        return [e for e in v if isinstance(e, dict) and str(e.get("name") or "").strip()] or None
+
+
+class AIPlan(BaseModel):
+    summary: str
+    weeks: list[AIPlanWeek] = Field(default_factory=list)
+    sessions: list[AIPlanSession] = Field(default_factory=list)
+
+    @field_validator("weeks", "sessions", mode="before")
+    @classmethod
+    def _lists(cls, v):
+        return v or []
+
+
+def _post_plan(body: dict, key: str) -> dict:
+    return _post(body, key, PLAN_TIMEOUT_S)
+
+
+def ask_plan(payload: dict, model: str | None = None, post=_post_plan, api_key: str | None = None) -> AIPlan:
+    """Ask the model to design the plan described by `payload` (see plan.ai_request)."""
+    key = resolve_key(api_key)
+    if not key:
+        raise CoachError("Enter your OpenRouter API key first.")
+    schema = json.dumps(AIPlan.model_json_schema())
+    body = {
+        "model": model or DEFAULT_MODEL,
+        "max_tokens": PLAN_MAX_TOKENS,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": f"{PLAN_SYSTEM}\n\nReply with a single JSON object matching this schema:\n{schema}"},
+            {"role": "user", "content": json.dumps(payload)},
+        ],
+    }
+    return _ask_json(body, key, post, AIPlan)

@@ -240,3 +240,26 @@ export function goalLine(g: PlanGoal, today: string): string {
   } else text = "General fitness";
   return g.name ? `${g.name} · ${text}` : text;
 }
+
+// ------------------------------------------------------------------ AI plan builder
+
+/** What POST /plan/build answers. */
+export interface BuildResult {
+  builder: "ai" | "rules"; status?: "up_to_date"; fallback?: string | null;
+  summary?: string; adjusted?: string[]; skipped?: string[]; rules_weeks?: string[];
+}
+
+/** The message shown after a plan build: a headline plus the changes the limits made to the AI's plan. */
+export function buildMessage(r: BuildResult, mode: "all" | "topup" | "week"): { kind: "info" | "error"; text: string; details: string[] } | null {
+  if (r.status === "up_to_date") return null;
+  if (r.builder === "rules") {
+    const what = mode === "week" ? "That week was" : mode === "topup" ? "The coming weeks were" : "The plan was";
+    return r.fallback
+      ? { kind: "error", text: `The AI coach couldn't build it (${r.fallback.replace(/\.$/, "")}). ${what} built by the rules instead.`, details: [] }
+      : { kind: "info", text: `${what} built by the rules. Your own sessions were kept.`, details: [] };
+  }
+  const details = [...(r.adjusted ?? []), ...(r.skipped ?? []).map((s) => `Left out: ${s}`)];
+  const rules = r.rules_weeks?.length ? ` The rules planned the weeks it left empty (${r.rules_weeks.map(shortDay).join(", ")}).` : "";
+  const what = mode === "week" ? "That week was" : mode === "topup" ? "The coming weeks were" : "Your plan was";
+  return { kind: "info", text: `${what} built by the AI coach.${rules}${details.length ? " Kept within your limits:" : ""}`, details };
+}
