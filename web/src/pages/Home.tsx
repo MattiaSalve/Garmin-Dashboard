@@ -58,26 +58,10 @@ export function useHomeData(minutes: number, sport: Sport, asPlanned = false) {
 const signed = (v: number, digits = 0) => `${v >= 0 ? "+" : ""}${v.toFixed(digits)}`;
 
 export function Home() {
-  const { minutes, setMinutes, sport, setSport, override } = useWorkout();
-  // "Do the planned session anyway": ignore today's readiness downgrade. Remembered for the rest of the day in this tab.
-  const asKey = `home_as_planned:${daysAgo(0)}`;
-  const [asPlanned, setAsPlannedState] = useState(() => { try { return sessionStorage.getItem(asKey) === "1"; } catch { return false; } });
-  const setAsPlanned = (v: boolean) => {
-    setAsPlannedState(v);
-    try { if (v) sessionStorage.setItem(asKey, "1"); else sessionStorage.removeItem(asKey); } catch { /* not remembered */ }
-  };
+  const { minutes, setMinutes, sport, setSport, override, asPlanned, setAsPlanned, mode, setMode } = useWorkout();
   const { data, error, loading, reload } = useHomeData(minutes, sport, asPlanned);
 
-  // Home shows today's planned session by default. "Suggest another workout" switches to picking a sport and time;
-  // the choice is remembered for the rest of the day in this tab.
-  const modeKey = `home_mode:${daysAgo(0)}`;
-  const [mode, setModeState] = useState<"plan" | "other">(() => {
-    try { return sessionStorage.getItem(modeKey) === "other" ? "other" : "plan"; } catch { return "plan"; }
-  });
-  const setMode = (m: "plan" | "other") => {
-    setModeState(m);
-    try { sessionStorage.setItem(modeKey, m); } catch { /* not remembered */ }
-  };
+  // Home shows today's planned session by default. "Suggest another workout" switches to picking a sport and time.
   const plan = data?.plan_today;
   const planned = !!plan && plan.planned.kind !== "rest" && SPORTS.includes(plan.sport as Sport);
   const showingPlan = planned && mode === "plan" && !override;

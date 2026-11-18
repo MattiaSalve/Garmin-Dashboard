@@ -1,5 +1,5 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
-import { daysAgo } from "./lib";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { api } from "./api";
 import type { HomeData } from "./pages/Home";
 
 export type Sport = "cycling" | "running" | "swimming" | "gym";
@@ -10,44 +10,22 @@ export const TIME_OPTIONS: Record<Sport, number[]> = {
   swimming: [20, 30, 40, 45, 60, 75, 90],
   gym: [20, 30, 45, 60, 75, 90],
 };
-const SPORT_KEY = "workout_sport";
-
 export type Workout = HomeData["workout"];
-
-export function savedSport(): Sport {
-  const saved = localStorage.getItem(SPORT_KEY) as Sport | null;
-  return saved && SPORTS.includes(saved) ? saved : "cycling";
-}
+export type HomeMode = "plan" | "other";
 
 /** A coach workout the user accepted for one sport, with the available time it was made for. */
 interface Accepted { minutes: number; workout: Workout }
 type AcceptedBySport = Partial<Record<Sport, Accepted>>;
-interface Stored { day: string; bySport: AcceptedBySport }
+/** Today's Home choices. Kept on the server per account (the server drops it at midnight) so every device agrees. */
+interface Stored { accepted?: AcceptedBySport; sport?: Sport; asPlanned?: boolean; mode?: HomeMode }
 
-// Accepted coach workouts are remembered in this browser until the end of the day, per Garmin account and per sport.
-const acceptedKey = (email: string) => `accepted_workout:${email}`;
-
-function loadAccepted(email: string): AcceptedBySport {
-  try {
-    const raw = localStorage.getItem(acceptedKey(email));
-    if (!raw) return {};
-    const stored = JSON.parse(raw) as Stored;
-    if (stored.day === daysAgo(0) && stored.bySport) {
-      return Object.fromEntries(
-        Object.entries(stored.bySport).filter(([sport, a]) => SPORTS.includes(sport as Sport) && a?.workout),
-      ) as AcceptedBySport;
-    }
-    localStorage.removeItem(acceptedKey(email)); // from an earlier day or in an older format
-  } catch { /* storage blocked or corrupt: start without it */ }
-  return {};
+function cleanAccepted(raw: AcceptedBySport | undefined): AcceptedBySport {
+  return Object.fromEntries(
+    Object.entries(raw ?? {}).filter(([sport, a]) => SPORTS.includes(sport as Sport) && a?.workout),
+  ) as AcceptedBySport;
 }
 
-function storeAccepted(email: string, bySport: AcceptedBySport) {
-  try {
-    if (Object.keys(bySport).length) localStorage.setItem(acceptedKey(email), JSON.stringify({ day: daysAgo(0), bySport }));
-    else localStorage.removeItem(acceptedKey(email));
-  } catch { /* the workout just won't survive a reload */ }
-}
+const closest = (options: number[], m: number) => options.reduce((best, o) => (Math.abs(o - m) < Math.abs(best - m) ? o : best));
 
 interface WorkoutState {
   sport: Sport;
@@ -56,6 +34,12 @@ interface WorkoutState {
   override: Workout | null;
   /** Gym only: the session the user asked for today ("auto" lets the app choose). */
   gymFocus: string;
+  /** "Do the planned session anyway": ignore today's readiness downgrade. */
+  asPlanned: boolean;
+  setAsPlanned: (v: boolean) => void;
+  /** Home shows today's plan, or a suggestion picked by sport and time. */
+  mode: HomeMode;
+  setMode: (m: HomeMode) => void;
   setGymFocus: (f: string) => void;
   setSport: (s: Sport) => void;
   setMinutes: (m: number) => void;
@@ -67,57 +51,87 @@ interface WorkoutState {
 const Ctx = createContext<WorkoutState | null>(null);
 
 /** The sport, available time and accepted coach workouts, shared by Home and the floating coach. */
-export function WorkoutProvider({ email, children }: { email: string; children: ReactNode }) {
-  const [accepted, setAccepted] = useState<AcceptedBySport>(() => loadAccepted(email));
-  const [sport, setSportState] = useState<Sport>(savedSport);
-  const [minutes, setMinutesState] = useState(() => accepted[sport]?.minutes ?? 60);
+export function WorkoutProvider({ children }: { email: string; children: ReactNode }) {
+  const [loaded, setLoaded] = useState(false);
+  const [accepted, setAccepted] = useState<AcceptedBySport>({});
+  const [sport, setSportState] = useState<Sport>("cycling");
+  const [minutes, setMinutesState] = useState(60);
   const [gymFocus, setGymFocusState] = useState("auto");
+  const [asPlanned, setAsPlannedState] = useState(false);
+  const [mode, setModeState] = useState<HomeMode>("plan");
 
-  // Change the accepted workouts and keep the stored copy in step.
-  const update = useCallback((change: (current: AcceptedBySport) => AcceptedBySport) => {
-    setAccepted((current) => {
-      const next = change(current);
-      storeAccepted(email, next);
-      return next;
-    });
-  }, [email]);
-  const without = (current: AcceptedBySport, key: Sport) => { const { [key]: _gone, ...rest } = current; return rest; };
+  // The latest values, so a save always sends the whole state.
+  const current = useRef<Stored>({});
+  const save = useCallback((patch: Stored) => {
+    current.current = { ...current.current, ...patch };
+    api("/home-state", { method: "PUT", body: { state: current.current } }).catch(() => { /* kept for this tab only */ });
+  }, []);
+
+  useEffect(() => {
+    let live = true;
+    api<{ state: Stored }>("/home-state")
+      .then(({ state }) => {
+        if (!live) return;
+        const acc = cleanAccepted(state.accepted);
+        const sp = state.sport && SPORTS.includes(state.sport) ? state.sport : "cycling";
+        current.current = { ...state, accepted: acc };
+        setAccepted(acc);
+        setSportState(sp);
+        setMinutesState(acc[sp]?.minutes ?? 60);
+        setAsPlannedState(!!state.asPlanned);
+        setModeState(state.mode === "other" ? "other" : "plan");
+      })
+      .catch(() => { /* start from the defaults */ })
+      .finally(() => { if (live) setLoaded(true); });
+    return () => { live = false; };
+  }, []);
+
+  const without = (acc: AcceptedBySport, key: Sport) => { const { [key]: _gone, ...rest } = acc; return rest; };
+  const dropAccepted = useCallback((key: Sport) => {
+    const next = without(current.current.accepted ?? {}, key);
+    setAccepted(next);
+    save({ accepted: next });
+  }, [save]);
 
   // Changing the time makes the accepted workout for this sport stale; other sports keep theirs.
   const setMinutes = useCallback((m: number) => {
     setMinutesState(m);
-    update((current) => without(current, sport));
-  }, [sport, update]);
+    if (current.current.accepted?.[sport]) dropAccepted(sport);
+  }, [sport, dropAccepted]);
   // A different focus makes the accepted gym workout stale, like a different time does.
   const setGymFocus = useCallback((f: string) => {
     setGymFocusState(f);
-    update((current) => without(current, "gym"));
-  }, [update]);
+    if (current.current.accepted?.gym) dropAccepted("gym");
+  }, [dropAccepted]);
   const applyWorkout = useCallback((w: Workout, target: Sport = sport) => {
     // The new sport may not offer the current time: use the closest option it does.
-    const m = target === sport ? minutes : TIME_OPTIONS[target].reduce((best, o) => (Math.abs(o - minutes) < Math.abs(best - minutes) ? o : best));
-    update((current) => ({ ...current, [target]: { minutes: m, workout: w } }));
+    const m = target === sport ? minutes : closest(TIME_OPTIONS[target], minutes);
+    const next = { ...(current.current.accepted ?? {}), [target]: { minutes: m, workout: w } };
+    setAccepted(next);
     if (target !== sport) {
-      try { localStorage.setItem(SPORT_KEY, target); } catch { /* private mode */ }
       setSportState(target);
       setMinutesState(m);
-    }
-  }, [sport, minutes, update]);
-  const clearOverride = useCallback(() => update((current) => without(current, sport)), [sport, update]);
+      save({ accepted: next, sport: target });
+    } else save({ accepted: next });
+  }, [sport, minutes, save]);
+  const clearOverride = useCallback(() => dropAccepted(sport), [sport, dropAccepted]);
   const setSport = useCallback((next: Sport) => {
-    try { localStorage.setItem(SPORT_KEY, next); } catch { /* private mode */ }
     setSportState(next);
+    save({ sport: next });
     // Back to a sport with an accepted workout: restore the time it was made for. Otherwise keep the chosen
     // time if the new sport offers it, or the closest option.
-    setMinutesState((m) => accepted[next]?.minutes ?? TIME_OPTIONS[next].reduce((best, o) => (Math.abs(o - m) < Math.abs(best - m) ? o : best)));
-  }, [accepted]);
+    setMinutesState((m) => accepted[next]?.minutes ?? closest(TIME_OPTIONS[next], m));
+  }, [accepted, save]);
+  const setAsPlanned = useCallback((v: boolean) => { setAsPlannedState(v); save({ asPlanned: v }); }, [save]);
+  const setMode = useCallback((m: HomeMode) => { setModeState(m); save({ mode: m }); }, [save]);
 
   const override = accepted[sport]?.workout ?? null;
   const value = useMemo(
-    () => ({ sport, minutes, override, gymFocus, setGymFocus, setSport, setMinutes, applyWorkout, clearOverride }),
-    [sport, minutes, override, gymFocus, setGymFocus, setSport, setMinutes, applyWorkout, clearOverride],
+    () => ({ sport, minutes, override, gymFocus, asPlanned, setAsPlanned, mode, setMode, setGymFocus, setSport, setMinutes, applyWorkout, clearOverride }),
+    [sport, minutes, override, gymFocus, asPlanned, setAsPlanned, mode, setMode, setGymFocus, setSport, setMinutes, applyWorkout, clearOverride],
   );
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  // Wait for the saved state so the first Home request already uses the right sport and time.
+  return <Ctx.Provider value={value}>{loaded ? children : null}</Ctx.Provider>;
 }
 
 export function useWorkout(): WorkoutState {

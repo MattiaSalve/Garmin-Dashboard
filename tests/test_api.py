@@ -1,3 +1,4 @@
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -272,3 +273,19 @@ def test_push_gym_session(client):
     warmup, squat, plank = payload["workoutSegments"][0]["workoutSteps"]
     assert payload["sportType"]["sportTypeKey"] == "strength_training" and warmup["stepType"]["stepTypeKey"] == "warmup"
     assert squat["workoutSteps"][0]["exerciseName"] == "GOBLET_SQUAT" and plank["workoutSteps"][0]["category"] == "PLANK"
+
+
+def test_home_state_is_shared_between_devices_and_resets_each_day(client):
+    sign_in(client)
+    day = {"X-Local-Date": date.today().isoformat()}
+    assert client.get("/api/home-state", headers=day).json() == {"state": {}}
+    client.put("/api/home-state", json={"state": {"sport": "running", "mode": "other"}}, headers=day)
+    phone = TestClient(api.app)
+    sign_in(phone)  # same account, another browser
+    state = phone.get("/api/home-state", headers=day).json()["state"]
+    assert state["sport"] == "running" and state["mode"] == "other"
+    tomorrow = {"X-Local-Date": (date.today() + timedelta(days=1)).isoformat()}
+    assert phone.get("/api/home-state", headers=tomorrow).json() == {"state": {}}
+    other = TestClient(api.app)
+    sign_in(other, "b@x.com")
+    assert other.get("/api/home-state", headers=day).json() == {"state": {}}

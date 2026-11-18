@@ -445,6 +445,35 @@ def put_goals(body: GoalsBody, session: Session = Depends(current_session)) -> d
     return {"goals": get_text_setting(GOALS_KEY, session.db_path)}
 
 
+HOME_STATE_KEY = "home_state"
+HOME_STATE_MAX = 200_000
+
+
+class HomeStateBody(BaseModel):
+    state: dict
+
+
+@router.get("/home-state")
+def get_home_state(session: Session = Depends(current_session), today: date = Depends(local_today)) -> dict:
+    """Today's Home choices (sport, accepted coach workouts, toggles), kept per account so every device agrees."""
+    try:
+        state = json.loads(get_text_setting(HOME_STATE_KEY, session.db_path) or "{}")
+    except ValueError:
+        state = {}
+    if not isinstance(state, dict) or state.get("day") != today.isoformat():
+        state = {}  # from an earlier day: start fresh
+    return {"state": state}
+
+
+@router.put("/home-state")
+def put_home_state(body: HomeStateBody, session: Session = Depends(current_session), today: date = Depends(local_today)) -> dict:
+    text = json.dumps({**body.state, "day": today.isoformat()})
+    if len(text) > HOME_STATE_MAX:
+        raise HTTPException(413, "Home state is too large")
+    set_text_setting(HOME_STATE_KEY, text, session.db_path)
+    return {"state": json.loads(text)}
+
+
 @router.get("/coach/models")
 def coach_models() -> dict:
     return {"models": list(dict.fromkeys([coach.DEFAULT_MODEL, *coach.MODELS])), "default": coach.DEFAULT_MODEL}
