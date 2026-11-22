@@ -10,12 +10,13 @@ import { Button } from "@/ui/button";
 
 interface Advice {
   summary: string;
-  agree_with_suggestion: boolean;
+  agree_with_suggestion: boolean | null;
   adjusted_steps: { minutes: number; pct_ftp_low: number; pct_ftp_high: number; label: string }[] | null;
   adjusted_exercises?: GymExercise[] | null;
   /** Set when the coach proposes a workout for a different sport than the selected one. */
   workout_sport?: Sport | null;
   cautions: string[];
+  tools_used?: string[];
 }
 
 // One turn of the conversation. Assistant turns keep the parsed advice for display; the raw text is what goes back to the model.
@@ -191,8 +192,9 @@ function AdviceCard({ advice, ftp, sport, selectedSport, thresholdPace, paceUnit
     <div className="card">
       <b>Coach · {sport !== selectedSport
         ? `suggests a ${SPORT_NAME[sport] ?? sport} workout instead`
-        : `${advice.agree_with_suggestion ? "agrees with" : "suggests changing"} the plan`}</b>
-      <p>{advice.summary}</p>
+        : advice.agree_with_suggestion === true ? "agrees with the plan" : advice.agree_with_suggestion === false ? "suggests changing the plan" : ""}</b>
+      <p style={{ whiteSpace: "pre-wrap" }}>{advice.summary}</p>
+      {advice.tools_used?.length ? <p className="muted">Looked at: {advice.tools_used.map((t) => t.replace(/^get_/, "").replace(/_/g, " ")).join(", ")}</p> : null}
       <ul>{advice.cautions.map((c) => <li key={c}>{c}</li>)}</ul>
       {advice.adjusted_steps ? (
         <table>

@@ -219,3 +219,70 @@ def test_ask_plan_reads_gym_exercises_loosely():
     assert (g.kind, e.group, e.sets, e.reps, e.rpe, e.rest_s) == ("lower", "legs", 4, "6", 10, 150)
     assert ride.exercises is None
     assert "gym_setup" in coach.PLAN_SYSTEM
+
+
+# ---------------------------------------------------------------- tool loop
+
+from garmin_dashboards import coach_tools, db  # noqa: E402
+
+
+def tool_reply(*calls):
+    return {"choices": [{"finish_reason": "tool_calls", "message": {"content": None, "tool_calls": [
+        {"id": f"c{i}", "type": "function", "function": {"name": n, "arguments": a}} for i, (n, a) in enumerate(calls)]}}]}
+
+
+class FakeBox:
+    specs = [{"type": "function", "function": {"name": "get_recovery"}}]
+
+    def __init__(self):
+        self.used, self.calls = [], []
+
+    def call(self, name, arguments):
+        self.calls.append((name, arguments))
+        self.used.append(name)
+        return '[{"day": "2026-11-20", "hrv_avg": 82}]'
+
+
+def test_tool_loop_runs_tools_then_answers():
+    box, bodies = FakeBox(), []
+    answers = iter([tool_reply(("get_recovery", '{"days": 7}')),
+                    reply(json.dumps({"summary": "HRV dipped on the 20th."}))])
+
+    def post(body, key):
+        bodies.append(body)
+        return next(answers)
+
+    advice = coach.ask_coach(payload(), post=post, api_key="k", toolbox=box)
+    assert advice.summary.startswith("HRV dipped") and advice.tools_used == ["get_recovery"]
+    assert box.calls == [("get_recovery", '{"days": 7}')]
+    assert "tools" in bodies[0] and "response_format" not in bodies[0]
+    last = bodies[1]["messages"]
+    assert last[-1]["role"] == "tool" and last[-2]["tool_calls"][0]["id"] == "c0"
+
+
+def test_tool_loop_is_capped_and_forces_an_answer():
+    box, bodies = FakeBox(), []
+
+    def post(body, key):
+        bodies.append(body)
+        if "tools" in body:
+            return tool_reply(("get_recovery", "{}"))
+        return reply(json.dumps({"summary": "Done."}))
+
+    advice = coach.ask_coach(payload(), post=post, api_key="k", toolbox=box)
+    assert advice.summary == "Done." and len(box.calls) == coach.MAX_TOOL_ROUNDS
+    assert "tools" not in bodies[-1] and "Answer now" in bodies[-1]["messages"][-1]["content"]
+
+
+def test_toolbox_tools_are_identifier_free_and_robust(tmp_path):
+    path = str(tmp_path / "t.db")
+    db.init_db(path)
+    box = coach_tools.Toolbox(path, date(2026, 11, 22), plan_block=lambda: {"weeks": []})
+    for spec in coach_tools.SPECS:
+        out = box.call(spec["function"]["name"], "{}")
+        assert "error" not in out or '"error"' not in out[:10], out
+        assert "raw_json" not in out and "@" not in out
+    assert json.loads(box.call("get_plan", None)) == {"weeks": []}
+    assert "unknown tool" in box.call("rm_rf", "{}")
+    assert "not valid JSON" in box.call("get_recovery", "{oops")
+    assert set(box.used) == {s["function"]["name"] for s in coach_tools.SPECS}

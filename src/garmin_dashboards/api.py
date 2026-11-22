@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from garminconnect.activity_details import parse_activity_detail_metrics
 from pydantic import BaseModel, Field
 
-from garmin_dashboards import auth, coach, garmin_workout, gym, plan
+from garmin_dashboards import auth, coach, coach_tools, garmin_workout, gym, plan
 from garmin_dashboards.db import (
     add_proposal, all_settings, clear_built_days, clear_plan, delete_plan_day, delete_setting, ensure_user_db, get_plan_days, get_proposal,
     get_proposals, get_text_setting, init_db, resolve, save_plan_days, set_proposal_status, set_setting, set_text_setting,
@@ -492,14 +492,16 @@ def _coach_payload(db: str, today: date, minutes: int, sport: str, focus: str | 
         # Always sent, so the coach can propose a gym workout when the athlete asks for one from another sport.
         gym={"goal_label": gym.GOAL_LABEL[gym.goal_from_setting(s.get("gym_goal"))], "days_since": c["trained"]["days"],
              "equipment": c["kit"].labels(), "effort": gym.EFFORTS[c["kit"].effort]},
-        plan=_coach_plan_block(db, today),
+        # History and the plan are fetched by the coach through its tools (coach_tools.Toolbox).
+        slim=True, today=today.isoformat(),
     )
 
 
 def _ask(db: str, today: date, payload: dict, body) -> dict:
     """Ask the coach; any plan_changes in the reply become a proposal the athlete can apply or dismiss."""
     try:
-        advice = coach.ask_coach(payload, model=body.model, api_key=body.api_key, history=body.history)
+        toolbox = coach_tools.Toolbox(db, today, plan_block=lambda: _coach_plan_block(db, today))
+        advice = coach.ask_coach(payload, model=body.model, api_key=body.api_key, history=body.history, toolbox=toolbox)
     except coach.CoachError as exc:
         raise HTTPException(400, str(exc)) from exc
     out = advice.model_dump()

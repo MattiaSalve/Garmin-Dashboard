@@ -38,10 +38,25 @@ DEFAULT_MODEL = os.environ.get("OPENROUTER_MODEL") or MODELS[0]
 TIMEOUT_S = 60
 GOALS_MAX = 1000  # characters of free text the athlete can attach
 
-SYSTEM = """You are an experienced, conservative endurance coach (cycling, running and swimming).
-You receive a JSON summary of an athlete's recent recovery data (HRV, resting heart rate, sleep),
-training load across all sports, a rules-based readiness verdict and the workout those rules picked
-for today in "sport_today".
+SYSTEM = """You are an experienced, conservative endurance coach (cycling, running, swimming and strength).
+You receive a short JSON summary: today's recovery and readiness verdict, the athlete's levels, goals, gym
+setup and the workout their rules engine picked for today in "sport_today".
+
+How to answer:
+- Answer the athlete's actual question first, in the shape it needs. A request to change a workout gets the
+  new workout and a one-line reason; "why am I tired?" gets a diagnosis from the data; "how is my FTP going?"
+  gets a trend. Do not open with a recitation of HRV, resting HR and sleep: mention a recovery number only
+  when it changes your answer, and then once.
+- You have read-only tools (get_recovery, get_training, get_strength_history, get_fitness, get_power_curve,
+  get_plan). Call them for anything the summary does not already settle (history, trends, when something was
+  last trained, how past hard days went) instead of guessing. Ask for only what the question needs, and cite
+  only numbers you have seen. Never invent data.
+- When they ask for a harder, longer or different workout, give it within safety limits (recovery signals and
+  the rules below) and say what you changed and why. Do not refuse just because the rules engine suggested less.
+- "summary" is your reply to the athlete: plain prose, as long as the question deserves (usually 2-6
+  sentences), and markdown lists only when listing helps. "cautions" is optional: only real warnings, empty
+  otherwise. Leave "agree_with_suggestion" null unless they asked about today's suggestion.
+- Attach adjusted_steps / adjusted_exercises / plan_changes only when the athlete wants a workout or plan change.
 
 - "athlete_levels" gives the athlete's level in each sport. Fit the workout to the level in the sport
   being trained today: a strong cyclist can still be a beginner runner who needs gentler running, with
@@ -52,7 +67,6 @@ for today in "sport_today".
   a sustained speed) and "targets" holds their weekly hours and yearly km targets. Shape the plan so it
   builds towards them: choose session types and durations that serve the goal, and say in one sentence
   how today's ride fits. Recovery signals still win over goals on a day when they conflict.
-- Explain the verdict in plain language, citing only numbers present in the data.
 - Say whether you agree with the suggested workout. Only propose adjusted steps if you have a
   clear reason; keep the same total duration and express targets as % of FTP for cycling, or % of threshold speed for running and swimming
   (the pct_ftp fields hold that percentage).
@@ -62,7 +76,6 @@ for today in "sport_today".
   adjusted_steps as an empty list. Never invent a ride to fill the day.
 - Do not make medical claims or diagnoses. If something looks unusual (e.g. a sharp resting HR jump),
   suggest the athlete pays attention to how they feel and seeks professional advice if it persists.
-- Be brief: the summary is 2-4 sentences.
 - Gym sessions: when "sport_today" is "gym" the suggested workout lists exercises (sets, reps, rpe 1-10, rest in
   seconds, muscle group). "gym.days_since_trained" says how many days ago each muscle group was last trained
   (null = nothing in the recent data) and "gym.goal_label" is why the athlete lifts: for "Support my endurance
@@ -229,13 +242,14 @@ class CoachPlanChange(BaseModel):
 
 class CoachAdvice(BaseModel):
     summary: str
-    agree_with_suggestion: bool
+    agree_with_suggestion: bool | None = None
     # The sport of the proposed workout when it isn't the one the athlete selected (null = the selected sport).
     workout_sport: Literal["cycling", "running", "swimming", "gym"] | None = None
     adjusted_steps: list[CoachStep] | None = None
     cautions: list[str] = Field(default_factory=list)
     adjusted_exercises: list[CoachExercise] | None = None  # gym sessions only
     plan_changes: list[CoachPlanChange] | None = None  # edits to the training plan, proposed to the athlete
+    tools_used: list[str] = Field(default_factory=list)  # set by the server, not the model
 
     @field_validator("cautions", mode="before")
     @classmethod
@@ -286,10 +300,16 @@ def build_payload(
     pace_unit: str = "",
     gym: dict | None = None,
     plan: dict | None = None,
+    slim: bool = False,
+    today: str | None = None,
 ) -> dict:
-    """Compact, identifier-free summary of the last 7 days plus today's verdict."""
+    """Compact, identifier-free summary of the last 7 days plus today's verdict.
+    `slim` (used with the lookup tools) keeps only today's row; the coach fetches history and the plan itself."""
     keep = ("day", "hrv_avg", "rhr", "sleep_score", "sleep_s", "bb_high")
+    if slim:
+        wellness, intensity, plan = wellness[-1:], intensity[-1:], None
     return {
+        **({"today": today} if today else {}),
         "athlete_goals": goals.strip()[:GOALS_MAX] or None,
         "targets": {k: v for k, v in (targets or {}).items() if v is not None},
         "sport_today": sport,
@@ -299,11 +319,11 @@ def build_payload(
         "threshold_pace_s": threshold_pace_s, "threshold_pace_unit": pace_unit or None,
         "hrv_range_ms": list(readiness.hrv_range) if readiness.hrv_range else None,
         "form_tsb": None if form is None else round(form, 1),
-        "recovery_last_7_days": [
+        ("recovery_latest" if slim else "recovery_last_7_days"): [
             {k: (round(r[k] / 3600, 1) if k == "sleep_s" and r.get(k) else r.get(k)) for k in keep}
             for r in wellness[-7:]
         ],
-        "training_last_7_days": [
+        ("training_latest" if slim else "training_last_7_days"): [
             {"day": d["day"], "load": round(d.get("load") or 0), "hard_min": round(d.get("hard_min") or 0),
              "hours": round(d.get("hours") or 0, 1)}
             for d in intensity[-7:]
@@ -376,11 +396,16 @@ def _reply(data: dict, model: str) -> tuple[str, dict]:
     return text, choice
 
 
+MAX_TOOL_ROUNDS = 4
+
+
 def ask_coach(
     payload: dict, model: str | None = None, post=_post, api_key: str | None = None,
-    history: list[ChatMessage] | None = None,
+    history: list[ChatMessage] | None = None, toolbox=None,
 ) -> CoachAdvice:
-    """Ask for advice. `history` holds the turns after the opening summary, ending with the athlete's new message."""
+    """Ask for advice. `history` holds the turns after the opening summary, ending with the athlete's new message.
+    With a `toolbox` (coach_tools.Toolbox) the model may look data up first: up to MAX_TOOL_ROUNDS rounds of
+    tool calls, then it must answer."""
     key = resolve_key(api_key)
     if not key:
         raise CoachError("Enter your OpenRouter API key first.")
@@ -400,12 +425,40 @@ def ask_coach(
             *turns,
         ],
     }
-    return _ask_json(body, key, post, CoachAdvice)
+    first = None
+    if toolbox is not None:
+        body, first = _run_tools(body, key, post, toolbox)
+    advice = _ask_json(body, key, post, CoachAdvice, first)
+    if toolbox is not None:
+        advice.tools_used = list(toolbox.used)
+    return advice
 
 
-def _ask_json(body: dict, key: str, post, cls: type[BaseModel]):
-    """Send the request and validate the JSON reply into `cls`. One retry when the reply comes back empty."""
-    text, choice = _reply(post(body, key), body["model"])
+def _run_tools(body: dict, key: str, post, toolbox) -> tuple[dict, tuple[str, dict] | None]:
+    """Let the model call the toolbox until it answers. Returns the body to finish with and, when the model
+    already wrote its answer, that (text, choice) so it isn't requested twice."""
+    # JSON mode and tool calls don't mix on every provider: the schema in the prompt and the tolerant parser do the job.
+    body = {k: v for k, v in body.items() if k != "response_format"}
+    messages = list(body["messages"])
+    for _ in range(MAX_TOOL_ROUNDS):
+        data = post({**body, "messages": messages, "tools": toolbox.specs}, key)
+        text, choice = _reply(data, body["model"])
+        calls = (choice.get("message") or {}).get("tool_calls") or []
+        if not calls:
+            return {**body, "messages": messages}, (text, choice)
+        messages.append({"role": "assistant", "content": text or None, "tool_calls": calls})
+        for call in calls:
+            fn = call.get("function") or {}
+            messages.append({"role": "tool", "tool_call_id": call.get("id", ""),
+                             "content": toolbox.call(fn.get("name", ""), fn.get("arguments"))})
+    messages.append({"role": "user", "content": "Answer now with what you have, as the JSON object. No more tool calls."})
+    return {**body, "messages": messages}, None
+
+
+def _ask_json(body: dict, key: str, post, cls: type[BaseModel], first: tuple[str, dict] | None = None):
+    """Send the request and validate the JSON reply into `cls`. One retry when the reply comes back empty.
+    `first` is a reply already received for this body."""
+    text, choice = first if first is not None else _reply(post(body, key), body["model"])
     if not text.strip():
         # Usually a one-off provider hiccup, or a reasoning model that spent the whole budget thinking:
         # retry once, asking for less reasoning in the second case.

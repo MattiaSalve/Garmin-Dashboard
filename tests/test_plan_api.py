@@ -207,7 +207,9 @@ def test_plan_review_turns_coach_changes_into_a_proposal(client, monkeypatch):  
     assert r.status_code == 200, r.text
     out = r.json()
     sent = seen["body"]["messages"][1]["content"]
-    assert "training_plan" in sent and "Gran fondo" not in sent and "a@x.com" not in sent
+    # The plan is fetched through the get_plan tool now, not sent up front.
+    assert "training_plan" not in sent and "Gran fondo" not in sent and "a@x.com" not in sent
+    assert "get_plan" in [t["function"]["name"] for t in seen["body"]["tools"]]
     assert "Review my training plan" in sent
     prop = out["plan_proposal"]
     assert prop["source"] == "coach" and prop["reason"].startswith("Shorter ride") and len(out["plan_skipped"]) == 1
