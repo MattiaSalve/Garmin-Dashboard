@@ -1144,8 +1144,9 @@ def apply_proposal(pid: int, session: Session = Depends(current_session), today:
             save_plan_days([asdict(plan.PlanDay(
                 c["day"], c["slot"], after["sport"], after["kind"], after["minutes"], after.get("planned_load", 0.0),
                 source, False, after.get("note") or (old.note if old else ""),
-                # A shorter or longer gym session keeps the AI's exercises; a different one doesn't.
-                old.exercises if old and (old.sport, old.kind) == (after["sport"], after["kind"]) else None,
+                # The coach's exercises win; otherwise a shorter or longer gym session keeps the old ones.
+                after.get("exercises")
+                or (old.exercises if old and (old.sport, old.kind) == (after["sport"], after["kind"]) else None),
             ))], db)
     set_proposal_status(pid, "applied", db)
     return {"ok": True}

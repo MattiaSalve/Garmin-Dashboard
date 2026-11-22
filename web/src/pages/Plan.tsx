@@ -28,7 +28,7 @@ interface PlanWeek {
 }
 export interface Proposal {
   id: number; kind: string; reason: string; source: "rules" | "coach"; created: string;
-  changes: (PlanChange & { after: { note?: string } | null })[];
+  changes: (PlanChange & { after: { note?: string; exercises?: { name: string; sets: number; reps: string; rpe?: number }[] } | null })[];
 }
 interface Profile { sports: Record<string, number>; hours_per_week: number; sessions_per_week: number | null; long_day: number }
 interface Athlete { equipment: string[]; effort: string }
@@ -440,7 +440,8 @@ export function Proposals({ proposals, onChange }: { proposals: Proposal[]; onCh
           <p><b>{p.source === "coach" ? "From the AI coach" : "From your training"}:</b> {p.reason}</p>
           <ul>
             {p.changes.map((c) => (
-              <li key={`${c.day}:${c.slot}`}>{changeLine(c)}{c.after?.note ? <span className="muted"> · {c.after.note}</span> : null}</li>
+              <li key={`${c.day}:${c.slot}`}>{changeLine(c)}{c.after?.note ? <span className="muted"> · {c.after.note}</span> : null}
+                {c.after?.exercises?.length ? <div className="muted">{c.after.exercises.map((e) => `${e.name} ${e.sets}×${e.reps}${e.rpe ? ` @${e.rpe}` : ""}`).join(" · ")}</div> : null}</li>
             ))}
           </ul>
           <div className="row">

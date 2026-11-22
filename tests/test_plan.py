@@ -548,3 +548,17 @@ def test_plan_suggestion_uses_the_ai_exercises_and_fits_them_to_the_day():
 def test_today_from_plan_carries_the_exercises():
     p = [P.PlanDay(TODAY.isoformat(), 0, "gym", "lower", 50, 10, "ai", False, "", AI_EXERCISES)]
     assert P.today_from_plan(p, ready(), [], TODAY)["exercises"] == AI_EXERCISES
+
+
+def test_coach_can_change_a_gym_sessions_exercises_without_changing_its_length():
+    tue = (TODAY + timedelta(days=4)).isoformat()
+    old = [{"name": "Squat", "group": "legs", "sets": 3, "reps": "8", "rpe": 7, "rest_s": 90, "note": ""}]
+    rows = [P.PlanDay(tue, 0, "gym", "full", 45, 20, exercises=old)]
+    new = [{"name": "Squat", "group": "legs", "sets": 4, "reps": "8", "rpe": 10, "rest_s": 120},
+           {"name": "Plank", "group": "core", "sets": 3, "reps": "45 s", "rpe": 8, "rest_s": 45}]
+    same = {"day": tue, "sport": "gym", "kind": "full", "minutes": 45}
+    changes, _ = P.coach_changes([{**same, "exercises": new}], rows, TODAY, RATES)
+    assert len(changes) == 1 and [e["name"] for e in changes[0]["after"]["exercises"]] == ["Squat", "Plank"]
+    assert changes[0]["after"]["exercises"][0]["rpe"] == 10
+    assert P.coach_changes([{**same, "exercises": old}], rows, TODAY, RATES)[0] == []  # nothing new
+    assert P.coach_changes([same], rows, TODAY, RATES)[0] == []

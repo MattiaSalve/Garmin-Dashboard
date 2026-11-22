@@ -104,6 +104,10 @@ How to answer:
   Thursday", "make next week lighter", "review my plan"), return plan_changes: each one sets a day's session
   (day as YYYY-MM-DD, slot 0 for the main session or 1 for a second one, sport, kind, minutes, and a one-line
   note saying why). Use kind "rest" to clear a session. Otherwise leave plan_changes null.
+  For a gym session, "exercises" is the complete exercise list for that session (name, group, sets, reps, rpe,
+  rest_s): use it for any change to what is done in the session (harder, more variety, different muscles, failure
+  sets = rpe 10), keeping minutes and kind as they are when only the content changes. The planned gym sessions in
+  the plan summary list their current exercises.
 - Plan changes: use only kinds listed in "kinds_by_sport" and the athlete's chosen sports; stay within their
   hours_per_week and sessions_per_week; keep hard sessions (tempo, sweet_spot, fartlek, threshold, vo2max) on
   non-consecutive days and not the day after the long session; never change locked sessions or days before
@@ -121,7 +125,9 @@ SCREENS = {
             "summary: this week and next, sessions per day). Read their messages as being about the plan. A "
             "request to change it (longer, shorter, move, add, remove a session) is answered with plan_changes "
             "for every affected session, not as today's workout (leave adjusted_steps and adjusted_exercises "
-            "null). Gym sessions in the plan can run up to 90 minutes. If you decline a change, say why.",
+            "null). Gym sessions in the plan can run up to 90 minutes. A change to what is done in a gym "
+            "session (harder, more variety, failure sets) is a plan_change with the full \"exercises\" list, even "
+            "when the minutes stay the same. If you cannot make a change, say why in the summary.",
 }
 
 
@@ -224,6 +230,7 @@ class CoachPlanChange(BaseModel):
     kind: str = "rest"
     minutes: int = 0
     note: str = ""
+    exercises: list[CoachExercise] | None = None  # gym only: the full exercise list for that session
 
     @field_validator("slot", mode="before")
     @classmethod

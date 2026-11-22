@@ -1029,7 +1029,9 @@ def coach_summary(
                 "status": day_status(by_day[iso], a, d, today),
                 "planned": [
                     {"slot": p.slot, "sport": p.sport, "kind": p.kind, "minutes": p.minutes,
-                     "load": round(p.planned_load), "locked": p.locked, "edited_by_athlete": p.source == "user"}
+                     "load": round(p.planned_load), "locked": p.locked, "edited_by_athlete": p.source == "user",
+                     **({"exercises": [{k: e.get(k) for k in ("name", "sets", "reps", "rpe")} for e in p.exercises]}
+                        if p.exercises else {})}
                     for p in sorted(by_day[iso], key=lambda p: p.slot) if p.kind != "rest"
                 ],
                 "done_minutes": round(a.get("minutes", 0)), "done_load": round(a.get("load", 0)),
@@ -1106,13 +1108,17 @@ def coach_changes(
         if problem:
             skipped.append(f"{day}: {problem}")
             continue
-        if before and (before.sport, before.kind, before.minutes) == (sport, kind, minutes):
+        exercises = ai_exercises(c.get("exercises")) if sport == gym.KEY else None
+        same_session = before and (before.sport, before.kind, before.minutes) == (sport, kind, minutes)
+        if same_session and (exercises is None or exercises == before.exercises):
             continue
         after = PlanDay(day, slot, sport, kind, minutes, planned_load(sport, kind, minutes, rates))
         change = _change(day, slot, before, after)
         note = str(c.get("note") or "").strip()[:COACH_NOTE_MAX]
         if note:
             change["after"]["note"] = note
+        if exercises:
+            change["after"]["exercises"] = exercises
         out[(day, slot)] = change
     return sorted(out.values(), key=lambda c: (c["day"], c["slot"])), skipped
 
