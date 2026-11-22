@@ -293,6 +293,38 @@ def search_activities(
     return [dict(r) for r in rows]
 
 
+# Columns find_activities may sort by (the key is what the coach passes, the value is the SQL expression).
+ACTIVITY_SORTS = {
+    "avg_power": "avg_power_w", "norm_power": "norm_power_w", "max_power": "max_power_w", "distance": "distance_m",
+    "duration": "COALESCE(moving_duration_s, duration_s)", "elevation": "elevation_gain_m", "avg_hr": "avg_hr",
+    "max_hr": "max_hr", "load": "training_load", "aerobic_te": "aerobic_te", "anaerobic_te": "anaerobic_te",
+    "avg_speed": "avg_speed_mps", "calories": "calories", "date": "start_time_local",
+}
+
+
+def top_activities(
+    start: date, end: date, sport: str | None = None, sort_by: str = "date", descending: bool = True,
+    limit: int = 10, db_path: str | None = None,
+) -> list[dict]:
+    """Activities in the range ranked by one measure (see ACTIVITY_SORTS); rows without the measure are left out.
+    No names or places: only numbers."""
+    expr = ACTIVITY_SORTS[sort_by]
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT date(start_time_local) AS day, sport_type, COALESCE(moving_duration_s, duration_s, 0) / 60.0 AS minutes,
+                   distance_m, elevation_gain_m, avg_hr, max_hr, avg_power_w, norm_power_w, max_power_w,
+                   training_load AS load, aerobic_te, anaerobic_te, avg_speed_mps
+            FROM activities
+            {_FILTER} AND ({expr}) IS NOT NULL
+            ORDER BY ({expr}) {"DESC" if descending else "ASC"}, start_time_local DESC
+            LIMIT :limit
+            """,
+            {**_params(start, end, sport), "limit": limit},
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def distance_by_group(start: date, end: date, db_path: str | None = None) -> dict[str, float]:
     """Kilometres per sport group (see SPORT_GROUPS) in the inclusive date range."""
     params = _params(start, end)

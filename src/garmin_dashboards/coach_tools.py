@@ -13,6 +13,8 @@ from garmin_dashboards import fitness, gym, metrics
 
 MAX_DAYS = 120
 MAX_ROWS = 200
+MAX_ACTIVITY_DAYS = 3650
+MAX_ACTIVITIES = 25
 
 WELLNESS_KEYS = ("day", "hrv_avg", "hrv_status", "rhr", "sleep_score", "sleep_s", "bb_high", "bb_low")
 
@@ -42,6 +44,14 @@ SPECS = [
     _spec("get_fitness", "Daily fitness (CTL), fatigue (ATL) and form (TSB) from training load, last N days.", _DAYS),
     _spec("get_power_curve", "Best average cycling power (watts) for key durations in the period, with the "
           "previous best before it, and the monthly FTP estimate trend.", _DAYS),
+    _spec("find_activities", "Look up individual activities, ranked by one measure: e.g. the highest average power "
+          "ride, the longest run, the most climbing, the hardest session by load. Returns day, sport, minutes, "
+          "distance_km, elevation_m, avg/max HR, avg/normalized/max power, load, training effect. No names.", {
+              "sport": {"type": "string", "description": "Optional: Cycling, Running, Swimming, Strength, or a Garmin sport key."},
+              "sort_by": {"type": "string", "enum": list(metrics.ACTIVITY_SORTS), "description": "Measure to rank by (default date)."},
+              "order": {"type": "string", "enum": ["highest_first", "lowest_first"], "description": "Default highest_first (newest first for date)."},
+              "days": {"type": "integer", "description": f"How many days back (1-{MAX_ACTIVITY_DAYS}, default 365)."},
+              "limit": {"type": "integer", "description": f"How many activities (1-{MAX_ACTIVITIES}, default 5)."}}),
     _spec("get_plan", "The athlete's training plan: planned sessions this week and next, how well recent weeks were "
           "followed, and open proposed changes. Null when there is no plan."),
 ]
@@ -108,6 +118,31 @@ class Toolbox:
         days = _days(args, 90)
         return {"best_power_w": metrics.power_curve(self._start(days), self.today, "Cycling", self.db),
                 "monthly_ftp_estimate": metrics.estimated_ftp_trend(self.db)[-12:]}
+
+    def _find_activities(self, args: dict) -> list[dict]:
+        sort_by = args.get("sort_by") or "date"
+        if sort_by not in metrics.ACTIVITY_SORTS:
+            return {"error": f"sort_by must be one of {', '.join(metrics.ACTIVITY_SORTS)}"}
+        try:
+            days = min(MAX_ACTIVITY_DAYS, max(1, int(args.get("days", 365))))
+            limit = min(MAX_ACTIVITIES, max(1, int(args.get("limit", 5))))
+        except (TypeError, ValueError):
+            return {"error": "days and limit must be whole numbers"}
+        sport = args.get("sport")
+        sport = str(sport).strip() if sport else None
+        if sport and sport not in metrics.SPORT_GROUPS and sport.lower() in {k.lower() for k in metrics.SPORT_GROUPS}:
+            sport = next(k for k in metrics.SPORT_GROUPS if k.lower() == sport.lower())
+        rows = metrics.top_activities(self.today - timedelta(days=days - 1), self.today, sport, sort_by,
+                                      args.get("order") != "lowest_first", limit, self.db)
+        return [{"day": r["day"], "sport": r["sport_type"], "minutes": round(r["minutes"]),
+                 "distance_km": round((r["distance_m"] or 0) / 1000, 1),
+                 "elevation_m": None if r["elevation_gain_m"] is None else round(r["elevation_gain_m"]),
+                 "avg_hr": r["avg_hr"] and round(r["avg_hr"]), "max_hr": r["max_hr"] and round(r["max_hr"]),
+                 "avg_power_w": r["avg_power_w"] and round(r["avg_power_w"]),
+                 "norm_power_w": r["norm_power_w"] and round(r["norm_power_w"]),
+                 "max_power_w": r["max_power_w"] and round(r["max_power_w"]),
+                 "load": r["load"] and round(r["load"]), "aerobic_te": r["aerobic_te"], "anaerobic_te": r["anaerobic_te"]}
+                for r in rows]
 
     def _get_plan(self, args: dict) -> dict | None:
         return self.plan_block()

@@ -48,8 +48,8 @@ How to answer:
   gets a trend. Do not open with a recitation of HRV, resting HR and sleep: mention a recovery number only
   when it changes your answer, and then once.
 - You have read-only tools (get_recovery, get_training, get_strength_history, get_fitness, get_power_curve,
-  get_plan). Call them for anything the summary does not already settle (history, trends, when something was
-  last trained, how past hard days went) instead of guessing. Ask for only what the question needs, and cite
+  get_plan, find_activities). Call them for anything the summary does not already settle (history, trends, when something was
+  last trained, how past hard days went, "my longest / hardest / highest-power ride" via find_activities) instead of guessing. Ask for only what the question needs, and cite
   only numbers you have seen. Never invent data.
 - When they ask for a harder, longer or different workout, give it within safety limits (recovery signals and
   the rules below) and say what you changed and why. Do not refuse just because the rules engine suggested less.
@@ -94,8 +94,11 @@ How to answer:
   they have to ride). Answer it directly, keep the earlier context, and when the workout changes return
   the complete updated adjusted_steps (not just the changed part). The athlete's request overrides
   "keep the same total duration", but still push back in the summary if a change looks unwise for their recovery.
-- "training_plan" (when present) is the athlete's multi-week plan, built by rules from their goals, sports and
-  weekly time. "weeks" lists this week and next day by day (planned sessions, status, what was done),
+- The summary says where the athlete is chatting from (Home or Plan). The plan comes from get_plan (a
+  "training_plan" block in the summary is the same data): their multi-week plan, built from their goals, sports
+  and weekly time. A request to change the plan ("make the gym sessions longer", "no training Thursday") is
+  answered with plan_changes, never only in prose and never as adjusted_exercises for today.
+  "weeks" lists this week and next day by day (planned sessions, status, what was done),
   "last_weeks_planned_vs_done" shows how well they followed it, and "open_proposals" are changes the rules have
   already suggested. Only when the athlete asks you to review or change the plan (e.g. "I can't train on
   Thursday", "make next week lighter", "review my plan"), return plan_changes: each one sets a day's session
@@ -107,6 +110,19 @@ How to answer:
   today; and when recovery is poor or they recently did much more than planned, make the coming days easier,
   not harder. Never add sessions to catch up on missed ones. Fewer, well-reasoned changes beat many. The athlete
   approves each change set before it is applied, so explain it in the summary."""
+
+
+# Where the athlete is chatting from: what they can see there, and what their messages are most likely about.
+SCREENS = {
+    "home": "The athlete is on the Home page, looking at today's recovery verdict and the workout recommended for "
+            "today (sport_today, suggested_workout in the summary). Read their messages as being about today's "
+            "workout unless they clearly ask about something else (history, trends, the plan).",
+    "plan": "The athlete is on the Plan page, looking at their multi-week training plan (training_plan in the "
+            "summary: this week and next, sessions per day). Read their messages as being about the plan. A "
+            "request to change it (longer, shorter, move, add, remove a session) is answered with plan_changes "
+            "for every affected session, not as today's workout (leave adjusted_steps and adjusted_exercises "
+            "null). Gym sessions in the plan can run up to 90 minutes. If you decline a change, say why.",
+}
 
 
 class CoachStep(BaseModel):
@@ -304,10 +320,10 @@ def build_payload(
     today: str | None = None,
 ) -> dict:
     """Compact, identifier-free summary of the last 7 days plus today's verdict.
-    `slim` (used with the lookup tools) keeps only today's row; the coach fetches history and the plan itself."""
+    `slim` (used with the lookup tools) keeps only today's row; the coach fetches history itself (and the plan, unless one is passed)."""
     keep = ("day", "hrv_avg", "rhr", "sleep_score", "sleep_s", "bb_high")
     if slim:
-        wellness, intensity, plan = wellness[-1:], intensity[-1:], None
+        wellness, intensity = wellness[-1:], intensity[-1:]
     return {
         **({"today": today} if today else {}),
         "athlete_goals": goals.strip()[:GOALS_MAX] or None,
@@ -401,7 +417,7 @@ MAX_TOOL_ROUNDS = 4
 
 def ask_coach(
     payload: dict, model: str | None = None, post=_post, api_key: str | None = None,
-    history: list[ChatMessage] | None = None, toolbox=None,
+    history: list[ChatMessage] | None = None, toolbox=None, screen: str | None = None,
 ) -> CoachAdvice:
     """Ask for advice. `history` holds the turns after the opening summary, ending with the athlete's new message.
     With a `toolbox` (coach_tools.Toolbox) the model may look data up first: up to MAX_TOOL_ROUNDS rounds of
@@ -420,7 +436,7 @@ def ask_coach(
         "max_tokens": 4000,  # some models spend part of this on reasoning before the JSON
         "response_format": {"type": "json_object"},
         "messages": [
-            {"role": "system", "content": f"{SYSTEM}\n\nReply with a single JSON object matching this schema:\n{schema}"},
+            {"role": "system", "content": f"{SYSTEM}\n\n{SCREENS.get(screen or '', '')}\n\nReply with a single JSON object matching this schema:\n{schema}"},
             {"role": "user", "content": opening},
             *turns,
         ],

@@ -207,8 +207,9 @@ def test_plan_review_turns_coach_changes_into_a_proposal(client, monkeypatch):  
     assert r.status_code == 200, r.text
     out = r.json()
     sent = seen["body"]["messages"][1]["content"]
-    # The plan is fetched through the get_plan tool now, not sent up front.
-    assert "training_plan" not in sent and "Gran fondo" not in sent and "a@x.com" not in sent
+    # On the Plan page the plan is part of the summary (identifier-free), and the coach is told where the athlete is.
+    assert "training_plan" in sent and "Plan page" in seen["body"]["messages"][0]["content"]
+    assert "Gran fondo" not in sent and "a@x.com" not in sent
     assert "get_plan" in [t["function"]["name"] for t in seen["body"]["tools"]]
     assert "Review my training plan" in sent
     prop = out["plan_proposal"]

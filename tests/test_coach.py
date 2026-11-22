@@ -286,3 +286,35 @@ def test_toolbox_tools_are_identifier_free_and_robust(tmp_path):
     assert "unknown tool" in box.call("rm_rf", "{}")
     assert "not valid JSON" in box.call("get_recovery", "{oops")
     assert set(box.used) == {s["function"]["name"] for s in coach_tools.SPECS}
+
+
+def test_find_activities_ranks_by_the_requested_measure(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "a.db")
+    db.init_db(path)
+    with sqlite3.connect(path) as conn:
+        for i, (day, sport, power) in enumerate([("2026-11-01", "cycling", 180), ("2026-11-10", "cycling", 240),
+                                                 ("2026-11-15", "running", None), ("2026-11-18", "cycling", 210)]):
+            conn.execute("INSERT INTO activities (activity_id, activity_name, sport_type, start_time_local, "
+                         "moving_duration_s, avg_power_w) VALUES (?, 'Secret name', ?, ?, 3600, ?)",
+                         (i, sport, f"{day} 08:00:00", power))
+    box = coach_tools.Toolbox(path, date(2026, 11, 22))
+    out = json.loads(box.call("find_activities", '{"sport": "cycling", "sort_by": "avg_power", "limit": 2}'))
+    assert [r["avg_power_w"] for r in out] == [240, 210] and out[0]["day"] == "2026-11-10"
+    assert "Secret" not in json.dumps(out)
+    low = json.loads(box.call("find_activities", '{"sort_by": "avg_power", "order": "lowest_first", "limit": 1}'))
+    assert low[0]["avg_power_w"] == 180  # rows without power are left out
+    assert "error" in json.loads(box.call("find_activities", '{"sort_by": "secret_column"}'))
+
+
+def test_screen_tells_the_coach_where_the_athlete_is():
+    bodies = []
+
+    def post(body, key):
+        bodies.append(body)
+        return reply(json.dumps({"summary": "ok"}))
+
+    coach.ask_coach(payload(), post=post, api_key="k", screen="plan")
+    assert "Plan page" in bodies[0]["messages"][0]["content"]
+    coach.ask_coach(payload(), post=post, api_key="k")
+    assert "Plan page" not in bodies[1]["messages"][0]["content"]

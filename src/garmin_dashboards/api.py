@@ -424,6 +424,7 @@ class CoachBody(BaseModel):
     minutes: int = 60
     sport: str = "cycling"
     focus: str | None = None  # gym only: the session the athlete asked to train
+    screen: Literal["home", "plan"] = "home"  # the page the athlete is chatting from
     model: str | None = None
     api_key: str | None = None
     # Turns after the opening summary (the server rebuilds that fresh), ending with the athlete's message.
@@ -479,7 +480,7 @@ def coach_models() -> dict:
     return {"models": list(dict.fromkeys([coach.DEFAULT_MODEL, *coach.MODELS])), "default": coach.DEFAULT_MODEL}
 
 
-def _coach_payload(db: str, today: date, minutes: int, sport: str, focus: str | None) -> dict:
+def _coach_payload(db: str, today: date, minutes: int, sport: str, focus: str | None, screen: str = "home") -> dict:
     c = _home_context(db, minutes, today, _check_sport(sport), _check_focus(focus))
     s = c["settings"]
     return coach.build_payload(
@@ -492,16 +493,18 @@ def _coach_payload(db: str, today: date, minutes: int, sport: str, focus: str | 
         # Always sent, so the coach can propose a gym workout when the athlete asks for one from another sport.
         gym={"goal_label": gym.GOAL_LABEL[gym.goal_from_setting(s.get("gym_goal"))], "days_since": c["trained"]["days"],
              "equipment": c["kit"].labels(), "effort": gym.EFFORTS[c["kit"].effort]},
-        # History and the plan are fetched by the coach through its tools (coach_tools.Toolbox).
+        # History is fetched by the coach through its tools (coach_tools.Toolbox). The plan is part of the summary
+        # only on the Plan page, where it is what the athlete is looking at.
+        plan=_coach_plan_block(db, today) if screen == "plan" else None,
         slim=True, today=today.isoformat(),
     )
 
 
-def _ask(db: str, today: date, payload: dict, body) -> dict:
+def _ask(db: str, today: date, payload: dict, body, screen: str = "home") -> dict:
     """Ask the coach; any plan_changes in the reply become a proposal the athlete can apply or dismiss."""
     try:
         toolbox = coach_tools.Toolbox(db, today, plan_block=lambda: _coach_plan_block(db, today))
-        advice = coach.ask_coach(payload, model=body.model, api_key=body.api_key, history=body.history, toolbox=toolbox)
+        advice = coach.ask_coach(payload, model=body.model, api_key=body.api_key, history=body.history, toolbox=toolbox, screen=screen)
     except coach.CoachError as exc:
         raise HTTPException(400, str(exc)) from exc
     out = advice.model_dump()
@@ -514,7 +517,7 @@ def ask_coach(
     body: CoachBody, session: Session = Depends(current_session), today: date = Depends(local_today),
 ) -> dict:
     db = session.db_path
-    return _ask(db, today, _coach_payload(db, today, body.minutes, body.sport, body.focus), body)
+    return _ask(db, today, _coach_payload(db, today, body.minutes, body.sport, body.focus, body.screen), body, body.screen)
 
 
 # ------------------------------------------------------------------ training plan
@@ -1230,8 +1233,8 @@ def review_plan(body: ReviewBody, session: Session = Depends(current_session), t
     sport = tp["sport"] if tp and tp["sport"] in plan.PLAN_SPORTS else max(shares, key=shares.get)
     minutes = tp["minutes"] if tp and tp["kind"] != "rest" else 60
     history = body.history or [coach.ChatMessage(role="user", content=REVIEW_PROMPT)]
-    payload = _coach_payload(db, today, min(600, max(20, minutes)), sport, None)
-    return _ask(db, today, payload, body.model_copy(update={"history": history}))
+    payload = _coach_payload(db, today, min(600, max(20, minutes)), sport, None, "plan")
+    return _ask(db, today, payload, body.model_copy(update={"history": history}), "plan")
 
 
 # ------------------------------------------------------------------ send to watch
