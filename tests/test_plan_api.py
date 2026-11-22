@@ -390,3 +390,15 @@ def test_home_gym_session_fits_the_equipment(client):  # noqa: F811
     names = [e["name"] for e in home["workout"]["exercises"]]
     assert "Ring row" in names or "Pull-up" in names
     assert not any(w in n for n in names for w in ("Dumbbell", "Barbell", "Band"))
+
+
+def test_plan_review_keeps_todays_exercises_when_the_model_answers_with_adjusted_exercises(client, monkeypatch):  # noqa: F811
+    setup_plan(client)
+    view = client.get("/api/plan", headers=H).json()
+    today_gym = [s for s in all_sessions(view) if s["day"] == view["today"] and s["sport"] == "gym"]
+    if not today_gym:
+        return  # the test plan has no gym session today
+    fake_coach(monkeypatch, {"summary": "Harder.", "adjusted_exercises": [
+        {"name": "Ring dips", "group": "push", "sets": 4, "reps": "max", "rpe": 10, "rest_s": 120}]})
+    out = client.post("/api/plan/review", json={"api_key": "k"}, headers=H).json()
+    assert out["plan_proposal"] and out["plan_proposal"]["changes"][0]["after"]["exercises"][0]["name"] == "Ring dips"

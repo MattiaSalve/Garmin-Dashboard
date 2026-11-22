@@ -507,6 +507,13 @@ def _ask(db: str, today: date, payload: dict, body, screen: str = "home") -> dic
         advice = coach.ask_coach(payload, model=body.model, api_key=body.api_key, history=body.history, toolbox=toolbox, screen=screen)
     except coach.CoachError as exc:
         raise HTTPException(400, str(exc)) from exc
+    if screen == "plan" and not advice.plan_changes and advice.adjusted_exercises:
+        # The model answered with today's-workout fields on the Plan page: keep its exercises as a change to today's gym session.
+        gym_row = next((p for p in _plan_rows(db, today, today) if p.sport == gym.KEY and p.kind != "rest"), None)
+        if gym_row:
+            advice.plan_changes = [coach.CoachPlanChange(
+                day=today.isoformat(), slot=gym_row.slot, sport=gym.KEY, kind=gym_row.kind, minutes=gym_row.minutes,
+                exercises=advice.adjusted_exercises)]
     out = advice.model_dump()
     out["plan_proposal"], out["plan_skipped"] = _coach_proposal(db, today, advice)
     return out
