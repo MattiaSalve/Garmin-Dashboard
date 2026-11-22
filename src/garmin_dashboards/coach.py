@@ -519,6 +519,9 @@ for endurance athletes). You design the athlete's multi-week training plan. You 
 - "goals" (the first one matters most; "weeks_to_go" counts down to its date), "athlete_goals" (their own words),
   "profile" (sports with the share of sessions each should get, hours_per_week, sessions_per_week (null = your
   choice), preferred_long_day) and "hours_available" (weeks where the athlete has less time than usual).
+- "athlete_request" (when set): what the athlete asked for in their own words for this plan, e.g. a focus, days
+  they can't train or a different shape for the weeks. Follow it as closely as the limits allow, ahead of your
+  usual defaults; mention in "summary" how you applied it, and what you could not do and why.
 - "athlete_levels" per sport, "fitness" (ctl = 42-day fitness and form_tsb from Garmin training load),
   "load_per_hour" (the athlete's own Garmin training load per hour by sport and intensity class) and
   "kind_intensity" (the class of each session kind).

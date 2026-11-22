@@ -1206,7 +1206,7 @@ def ai_request(
     ctl: float, form: float | None, rates: dict, recent: list[dict], wellness: list[dict],
     readiness_levels: dict[str, str], existing: list[PlanDay], done: dict[str, dict],
     overrides: dict[str, float], fill: set[date], previous_weeks: dict[str, dict] | None = None,
-    goals_text: str = "", kit: gym.Kit = gym.FULL_KIT,
+    goals_text: str = "", kit: gym.Kit = gym.FULL_KIT, request: str = "",
 ) -> dict:
     """What the AI plan builder gets: identifier-free (no goal names, activity names, places or account details).
 
@@ -1240,6 +1240,7 @@ def ai_request(
         "targets_until": end.isoformat(),
         "goals": [goal_out(g) for g in goals],
         "athlete_goals": goals_text.strip()[:1000] or None,
+        "athlete_request": request.strip()[:1000] or None,
         "profile": {
             "sports": {s: round(v, 2) for s, v in profile.shares().items()},
             "hours_per_week": profile.hours_per_week, "sessions_per_week": profile.sessions_per_week,

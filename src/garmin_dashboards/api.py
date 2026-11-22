@@ -613,7 +613,7 @@ def _ai_state(db: str) -> dict:
     detailed: [mondays whose sessions it wrote]}."""
     raw = _json_setting(db, AI_PLAN_KEY, {})
     raw = raw if isinstance(raw, dict) else {}
-    return {"model": raw.get("model"), "built": raw.get("built"), "summary": raw.get("summary") or "",
+    return {"model": raw.get("model"), "request": str(raw.get("request") or ""), "built": raw.get("built"), "summary": raw.get("summary") or "",
             "weeks": raw.get("weeks") if isinstance(raw.get("weeks"), dict) else {},
             "detailed": [w for w in raw.get("detailed") or [] if isinstance(w, str)]}
 
@@ -761,7 +761,7 @@ def _plan_view(db: str, today: date, weeks: list[plan.WeekTarget], actual: dict[
             "days": days,
         })
     return {"weeks": out_weeks, "proposals": _proposals_out(db),
-            "ai": {"model": ai["model"], "built": ai["built"], "summary": ai["summary"],
+            "ai": {"model": ai["model"], "request": ai["request"], "built": ai["built"], "summary": ai["summary"],
                    "topup_weeks": [w.isoformat() for w in _topup_weeks(db, today)]}}
 
 
@@ -890,6 +890,7 @@ class BuildBody(BaseModel):
     week_start: date | None = None  # mode "week"
     model: str | None = None
     api_key: str | None = None
+    prompt: str | None = Field(default=None, max_length=1000)  # what the athlete wants from this plan, in their words
 
 
 _plan_locks: dict[str, threading.Lock] = {}
@@ -921,6 +922,8 @@ def build_plan_route(body: BuildBody, session: Session = Depends(current_session
         fill = horizon
     if not fill:
         return {"builder": "ai", "status": "up_to_date"}
+    if body.prompt and body.prompt.strip() and not coach.is_available(body.api_key):
+        raise HTTPException(400, "Enter your OpenRouter key in Home → Ask coach to build a plan from a request.")
     lock = _plan_lock(db)
     if not lock.acquire(blocking=False):
         raise HTTPException(409, "The plan is already being built.")
@@ -946,12 +949,14 @@ def _ai_build(db: str, today: date, profile: plan.Profile, goals: list[plan.Goal
     done = _actual_days(db, week0, today - timedelta(days=1))
     overrides = _week_overrides(db)
     state = _ai_state(db)
+    # A new request is remembered, so the weeks topped up later keep following it; an empty one clears it.
+    request = (body.prompt if body.prompt is not None else state["request"]).strip()
     history = activity_loads(week0 - timedelta(weeks=plan.AI_RECENT_WEEKS), today, db)
     payload = plan.ai_request(
         today, profile, goals, inp["levels"], gym.GOAL_LABEL[inp["gym_goal"]], inp["ctl"], form_today(inp["series"]),
         inp["rates"], plan.recent_weeks(history, today), daily_wellness(today - timedelta(days=90), today, db),
         _readiness_levels(db, today, inp["settings"], inp["series"]), existing, done, overrides, fill,
-        previous_weeks=state["weeks"], goals_text=get_text_setting(GOALS_KEY, db), kit=_kit(db),
+        previous_weeks=state["weeks"], goals_text=get_text_setting(GOALS_KEY, db), kit=_kit(db), request=request,
     )
     ai = coach.ask_plan(payload, model=body.model, api_key=body.api_key)
     result = plan.check_ai_plan(
@@ -972,7 +977,7 @@ def _ai_build(db: str, today: date, profile: plan.Profile, goals: list[plan.Goal
     weeks = {w: t for w, t in state["weeks"].items() if w < first}
     weeks.update({w: t for w, t in result.weeks.items() if w >= first or w not in weeks})
     detailed = [w for w in state["detailed"] if date.fromisoformat(w) not in fill] if body.mode != "all" else []
-    _save_ai_state(db, {"model": body.model or coach.DEFAULT_MODEL, "built": today.isoformat(), "summary": ai.summary.strip()[:1000],
+    _save_ai_state(db, {"model": body.model or coach.DEFAULT_MODEL, "request": request, "built": today.isoformat(), "summary": ai.summary.strip()[:1000],
                         "weeks": weeks, "detailed": detailed + [w.isoformat() for w in planned]}, today)
     return {
         "builder": "ai", "summary": ai.summary, "adjusted": result.adjusted, "skipped": result.skipped,

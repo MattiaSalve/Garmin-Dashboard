@@ -39,7 +39,7 @@ interface Setup {
     equipment: Record<string, string>; efforts: Record<string, string>; about_max: number;
   };
 }
-interface AIState { model: string | null; built: string | null; summary: string; topup_weeks: string[] }
+interface AIState { model: string | null; request?: string; built: string | null; summary: string; topup_weeks: string[] }
 interface PlanView { setup: Setup; today: string; weeks: PlanWeek[]; proposals: Proposal[]; ai: AIState }
 type BuildMode = "all" | "topup" | "week";
 type Message = { kind: "error" | "info"; text: string; details?: string[] };
@@ -98,14 +98,14 @@ export function Plan() {
   const building = useRef(false);
 
   /** Build with the AI coach (the server falls back to the rules without a key or when the AI fails). */
-  const build = async (mode: BuildMode, weekStart?: string) => {
+  const build = async (mode: BuildMode, weekStart?: string, prompt?: string) => {
     if (building.current) return;
     building.current = true;
     setBusy(mode === "topup" ? "The AI coach is planning the coming weeks… this can take a minute or two."
       : key ? "The AI coach is building your plan… this can take a minute or two." : "Rebuilding the plan…");
     setMessage(null);
     try {
-      const r = await api<BuildResult>("/plan/build", { body: { mode, week_start: weekStart ?? null, api_key: key || null, model: model || null } });
+      const r = await api<BuildResult>("/plan/build", { body: { mode, week_start: weekStart ?? null, api_key: key || null, model: model || null, prompt: prompt ?? null } });
       setMessage(buildMessage(r, mode));
     } catch (e) {
       setMessage({ kind: "error", text: (e as Error).message });
@@ -187,6 +187,8 @@ export function Plan() {
           <Button variant="secondary" disabled={!!busy}
             onClick={() => { if (confirm("Delete the plan, its goals and every edit?")) act(() => api("/plan", { method: "DELETE" })); }}>Start over</Button>
         </div>
+        <PlanPrompt key={ai.request ?? ""} saved={ai.request ?? ""} model={model} busy={!!busy} hasKey={!!key}
+          onBuild={(text) => build("all", undefined, text)} onReviewed={reload} />
         {busy ? <p><Banner kind="info">{busy}</Banner></p> : null}
         {message ? (
           <div><Banner kind={message.kind}>{message.text}
@@ -195,7 +197,6 @@ export function Plan() {
         ) : null}
       </CollapsibleCard>
       <Proposals proposals={data.proposals} onChange={reload} />
-      <Review onDone={reload} model={model} />
       <PlanCalendar weeks={now} today={data.today} setup={setup} onChange={reload}
         onHoursSet={key ? (ws) => build("week", ws) : undefined} />
       {later.length ? <LaterWeeks weeks={later} /> : null}
@@ -457,57 +458,57 @@ export function Proposals({ proposals, onChange }: { proposals: Proposal[]; onCh
 
 interface ReviewReply { summary: string; cautions: string[]; plan_proposal: Proposal | null; plan_skipped: string[] }
 
-/** Ask the AI coach to look over this week and next. Its changes arrive as a proposal above. */
-function Review({ onDone, model }: { onDone: () => void; model: string }) {
-  const [message, setMessage] = useState("");
+/** One box for telling the coach what you want: build a new plan from it, or ask for changes to the current one. */
+function PlanPrompt({ saved, model, busy, hasKey, onBuild, onReviewed }: {
+  saved: string; model: string; busy: boolean; hasKey: boolean; onBuild: (text: string) => void; onReviewed: () => void;
+}) {
+  const [text, setText] = useState(saved);
   const [reply, setReply] = useState<ReviewReply | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const key = loadKey();
-  const ask = async () => {
-    setBusy(true);
+  const review = async () => {
+    setReviewing(true);
     setError(null);
     setReply(null);
     try {
       const r = await api<ReviewReply>("/plan/review", {
-        body: {
-          api_key: key, model: model || null,
-          history: message.trim() ? [{ role: "user", content: message.trim() }] : [],
-        },
+        body: { api_key: key, model: model || null, history: text.trim() ? [{ role: "user", content: text.trim() }] : [] },
       });
       setReply(r);
-      setMessage("");
-      onDone();
+      onReviewed();
     } catch (e) {
       setError((e as Error).message);
     } finally {
-      setBusy(false);
+      setReviewing(false);
     }
   };
   return (
-    <CollapsibleCard id="plan:review" title="Ask the AI coach to review the plan" defaultOpen={false}>
-      <div>
-        <p className="muted">
-          The coach sees this week and next, how you followed the last two weeks, your recovery and your goals (no names, places or
-          account details). Any changes it suggests appear above for you to apply or dismiss. Uses the OpenRouter key from the
-          “Ask coach” panel{key ? ` and the model chosen above (${model})` : " (none entered yet)"}.
-        </p>
-        <label className="field">Anything to tell the coach? (optional)
-          <textarea rows={2} maxLength={1000} value={message} onChange={(e) => setMessage(e.target.value)}
-            placeholder="e.g. I can't train on Thursday next week, and I'd like a longer ride on Sunday instead of Saturday." />
-        </label>
-        <p><Button disabled={busy} onClick={ask}>{busy ? "The coach is reviewing…" : "Review my plan"}</Button></p>
-        {error ? <Banner kind="error">{error}</Banner> : null}
-        {reply ? (
-          <div>
-            <p>{reply.summary}</p>
-            {reply.cautions.length ? <ul>{reply.cautions.map((c) => <li key={c}>{c}</li>)}</ul> : null}
-            <p className="muted">{reply.plan_proposal ? "Its changes are listed under “Suggested changes”." : "No changes suggested."}</p>
-            {reply.plan_skipped.length ? <p className="muted">Left out: {reply.plan_skipped.join(" ")}</p> : null}
-          </div>
-        ) : null}
+    <div>
+      <label className="field">What do you want from your plan?
+        <textarea rows={3} maxLength={1000} value={text} onChange={(e) => setText(e.target.value)} disabled={!hasKey}
+          placeholder={hasKey ? "e.g. Focus on threshold work for the next 6 weeks, keep Wednesdays free, and make Sundays the long ride."
+            : "Enter an OpenRouter key in Home → Ask coach to ask the AI coach."} />
+      </label>
+      <p className="muted">
+        The coach sees your goals, recovery and recent training (no names, places or account details), and what you write here.
+        “Build plan” writes a new plan from your request and remembers it for the weeks added later. “Suggest changes” leaves the
+        plan as it is and lists edits to apply or dismiss. Sessions you edited or locked always stay.
+      </p>
+      <div className="row">
+        <Button disabled={busy || reviewing || !hasKey} onClick={() => onBuild(text.trim())}>Build plan from this</Button>
+        <Button variant="secondary" disabled={busy || reviewing || !hasKey} onClick={review}>{reviewing ? "The coach is reviewing…" : "Suggest changes"}</Button>
       </div>
-    </CollapsibleCard>
+      {error ? <Banner kind="error">{error}</Banner> : null}
+      {reply ? (
+        <div>
+          <p>{reply.summary}</p>
+          {reply.cautions.length ? <ul>{reply.cautions.map((c) => <li key={c}>{c}</li>)}</ul> : null}
+          <p className="muted">{reply.plan_proposal ? "Its changes are listed under “Suggested changes”." : "No changes suggested."}</p>
+          {reply.plan_skipped.length ? <p className="muted">Left out: {reply.plan_skipped.join(" ")}</p> : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
